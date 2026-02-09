@@ -65,7 +65,7 @@
 
 /**** Warning macros, disable to save memory */
 #define UBX_WARN(...)         {GPS_WARN(__VA_ARGS__);}
-#define UBX_DEBUG(...)        {/*GPS_WARN(__VA_ARGS__);*/}
+#define UBX_DEBUG(...)        {GPS_WARN(__VA_ARGS__);}
 
 GPSDriverUBX::GPSDriverUBX(Interface gpsInterface, GPSCallbackPtr callback, void *callback_user,
 			   sensor_gps_s *gps_position, satellite_info_s *satellite_info, uint8_t dynamic_model,
@@ -165,6 +165,7 @@ GPSDriverUBX::configure(unsigned &baudrate, const GPSConfig &config)
 				_proto_ver_27_or_higher = true;
 				// Now we only have to change the baudrate
 				cfg_valset_msg_size = initCfgValset();
+				desired_baudrate = 57600;
 				cfgValset<uint32_t>(UBX_CFG_KEY_CFG_UART1_BAUDRATE, desired_baudrate, cfg_valset_msg_size);
 
 				if (!sendMessage(UBX_MSG_CFG_VALSET, (uint8_t *)&_buf, cfg_valset_msg_size)) {
@@ -326,7 +327,10 @@ GPSDriverUBX::configure(unsigned &baudrate, const GPSConfig &config)
 	int ret;
 
 	if (_proto_ver_27_or_higher) {
-		ret = configureDevice(config, _uart2_baudrate);
+		UBX_DEBUG("configureDevice disabled!");
+		//ret = configureDevice(config, _uart2_baudrate);
+		_use_nav_pvt = true;
+		ret = 0;
 
 	} else {
 		ret = configureDevicePreV27(config.gnss_systems);
@@ -569,11 +573,11 @@ int GPSDriverUBX::configureDevice(const GPSConfig &config, const int32_t uart2_b
 
 	switch (_board) {
 	case Board::u_blox9_F9P_L1L2:
-		rate_meas = 200; // 5Hz
+		rate_meas = 40; // 20Hz - Out of spec but working.
 		break;
 
 	case Board::u_blox9_F9P_L1L5:
-		rate_meas = 143; // 7Hz
+		rate_meas = 40; // 20Hz - Out of spec but working.
 		break;
 
 	default:
@@ -1985,7 +1989,7 @@ GPSDriverUBX::payloadRxDone()
 
 		_gps_position->satellites_used	= _buf.payload_rx_nav_pvt.numSV;
 
-		if (_gps_position->fix_type < 6) {
+		if (_gps_position->fix_type < 99) { // Continue receiving non HPPOS even in RTK mode.
 			// When RTK is active and solid (fix=6), these values will be filled by HPPOSLLH:
 			_gps_position->latitude_deg		= _buf.payload_rx_nav_pvt.lat * 1e-7;
 			_gps_position->longitude_deg		= _buf.payload_rx_nav_pvt.lon * 1e-7;
