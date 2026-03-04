@@ -55,6 +55,14 @@
 #include "rtcm.h"
 #include "ubx.h"
 
+// CPU time
+#include <drivers/drv_hrt.h>
+
+/* CSV prefixes for logging */
+static constexpr char UBX_NAV_DOP_PREFIX[] = "DOP";
+static constexpr char UBX_NAV_PVT_PREFIX[] = "PVT";
+static constexpr char UBX_RXM_RTCM_PREFIX[] = "RTM";
+
 #define MIN(X,Y)              ((X) < (Y) ? (X) : (Y))
 #define SWAP16(X)             ((((X) >>  8) & 0x00ff) | (((X) << 8) & 0xff00))
 
@@ -79,6 +87,10 @@ GPSDriverUBX::GPSDriverUBX(Interface gpsInterface, GPSCallbackPtr callback, void
 	_heading_offset(heading_offset),
 	_uart2_baudrate(uart2_baudrate)
 {
+	/* Emit CSV headers for UBX messages (PVT, DOP) once at driver construction */
+	PX4_INFO_RAW("PVT,now_us,iTOW,year,month,day,hour,min,sec,valid,tAcc,nano,fixType,flags,numSV,lon,lat,height,hMSL,hAcc,vAcc,velN,velE,velD,gSpeed,headMot,sAcc,headAcc,pDOP,headVeh\r\n");
+	PX4_INFO_RAW("DOP,now_us,iTOW,gDOP,pDOP,tDOP,vDOP,hDOP,nDOP,eDOP\r\n");
+	PX4_INFO_RAW("RTM,now_us,version,flags,subType,refStationID,msgType\r\n");
 	decodeInit();
 }
 
@@ -1963,6 +1975,41 @@ GPSDriverUBX::payloadRxDone()
 	case UBX_MSG_NAV_PVT:
 		UBX_TRACE_RXMSG("Rx NAV-PVT");
 
+		/* CSV log: prefix, now_us, iTOW, year, month, day, hour, min, sec, valid, tAcc, nano,
+		   fixType, flags, numSV, lon, lat, height, hMSL, hAcc, vAcc, velN, velE, velD,
+		   gSpeed, headMot, sAcc, headAcc, pDOP, headVeh */
+		PX4_INFO_RAW("%s,%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%d,%u,%u,%u,%d,%d,%d,%d,%u,%u,%d,%d,%d,%d,%d,%u,%u,%u,%d\r\n",
+			     UBX_NAV_PVT_PREFIX,
+			     (unsigned long long)hrt_absolute_time(),
+			     (unsigned)_buf.payload_rx_nav_pvt.iTOW,
+			     (unsigned)_buf.payload_rx_nav_pvt.year,
+			     (unsigned)_buf.payload_rx_nav_pvt.month,
+			     (unsigned)_buf.payload_rx_nav_pvt.day,
+			     (unsigned)_buf.payload_rx_nav_pvt.hour,
+			     (unsigned)_buf.payload_rx_nav_pvt.min,
+			     (unsigned)_buf.payload_rx_nav_pvt.sec,
+			     (unsigned)_buf.payload_rx_nav_pvt.valid,
+			     (unsigned)_buf.payload_rx_nav_pvt.tAcc,
+			     (int)_buf.payload_rx_nav_pvt.nano,
+			     (unsigned)_buf.payload_rx_nav_pvt.fixType,
+			     (unsigned)_buf.payload_rx_nav_pvt.flags,
+			     (unsigned)_buf.payload_rx_nav_pvt.numSV,
+			     (int)_buf.payload_rx_nav_pvt.lon,
+			     (int)_buf.payload_rx_nav_pvt.lat,
+			     (int)_buf.payload_rx_nav_pvt.height,
+			     (int)_buf.payload_rx_nav_pvt.hMSL,
+			     (unsigned)_buf.payload_rx_nav_pvt.hAcc,
+			     (unsigned)_buf.payload_rx_nav_pvt.vAcc,
+			     (int)_buf.payload_rx_nav_pvt.velN,
+			     (int)_buf.payload_rx_nav_pvt.velE,
+			     (int)_buf.payload_rx_nav_pvt.velD,
+			     (int)_buf.payload_rx_nav_pvt.gSpeed,
+			     (int)_buf.payload_rx_nav_pvt.headMot,
+			     (unsigned)_buf.payload_rx_nav_pvt.sAcc,
+			     (unsigned)_buf.payload_rx_nav_pvt.headAcc,
+			     (unsigned)_buf.payload_rx_nav_pvt.pDOP,
+			     (int)_buf.payload_rx_nav_pvt.headVeh);
+
 		//Check if position fix flag is good
 		if ((_buf.payload_rx_nav_pvt.flags & UBX_RX_NAV_PVT_FLAGS_GNSSFIXOK) == 1) {
 			_gps_position->fix_type		 = _buf.payload_rx_nav_pvt.fixType;
@@ -2146,6 +2193,19 @@ GPSDriverUBX::payloadRxDone()
 
 		_gps_position->hdop		= _buf.payload_rx_nav_dop.hDOP * 0.01f;	// from cm to m
 		_gps_position->vdop		= _buf.payload_rx_nav_dop.vDOP * 0.01f;	// from cm to m
+
+		/* CSV log: prefix, now_us, iTOW and DOPs (as floats) */
+		PX4_INFO_RAW("%s,%llu,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\r\n",
+			UBX_NAV_DOP_PREFIX,
+			(unsigned long long)hrt_absolute_time(),
+			(unsigned int)_buf.payload_rx_nav_dop.iTOW,
+			(double)(_buf.payload_rx_nav_dop.gDOP * 0.01f),
+			(double)(_buf.payload_rx_nav_dop.pDOP * 0.01f),
+			(double)(_buf.payload_rx_nav_dop.tDOP * 0.01f),
+			(double)(_buf.payload_rx_nav_dop.vDOP * 0.01f),
+			(double)(_buf.payload_rx_nav_dop.hDOP * 0.01f),
+			(double)(_buf.payload_rx_nav_dop.nDOP * 0.01f),
+			(double)(_buf.payload_rx_nav_dop.eDOP * 0.01f));
 
 		ret = 1;
 		break;
@@ -2389,6 +2449,16 @@ GPSDriverUBX::payloadRxDone()
 
 		_gps_position->rtcm_msg_used  = (_buf.payload_rx_rxm_rtcm.flags & UBX_RX_RXM_RTCM_MSGUSED_MASK) >>
 						UBX_RX_RXM_RTCM_MSGUSED_SHIFT;
+
+		/* CSV log: RXM-RTCM brief info */
+		PX4_INFO_RAW("%s,%llu,%u,%u,%u,%u,%u\r\n",
+			UBX_RXM_RTCM_PREFIX,
+			(unsigned long long)hrt_absolute_time(),
+			(unsigned)_buf.payload_rx_rxm_rtcm.version,
+			(unsigned)_buf.payload_rx_rxm_rtcm.flags,
+			(unsigned)_buf.payload_rx_rxm_rtcm.subType,
+			(unsigned)_buf.payload_rx_rxm_rtcm.refStationID,
+			(unsigned)_buf.payload_rx_rxm_rtcm.msgType);
 
 		ret = 1;
 		break;
