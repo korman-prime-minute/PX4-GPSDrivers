@@ -2193,6 +2193,7 @@ GPSDriverUBX::payloadRxDone()
 
 		_gps_position->hdop		= _buf.payload_rx_nav_dop.hDOP * 0.01f;	// from cm to m
 		_gps_position->vdop		= _buf.payload_rx_nav_dop.vDOP * 0.01f;	// from cm to m
+		_gps_position->pdop		= _buf.payload_rx_nav_dop.pDOP * 0.01f;	// from cm to m //TODO (dekel): test behavior
 
 		/* CSV log: prefix, now_us, iTOW and DOPs (as floats) */
 		PX4_INFO_RAW("%s,%llu,%u,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f\r\n",
@@ -2449,6 +2450,11 @@ GPSDriverUBX::payloadRxDone()
 
 		_gps_position->rtcm_msg_used  = (_buf.payload_rx_rxm_rtcm.flags & UBX_RX_RXM_RTCM_MSGUSED_MASK) >>
 						UBX_RX_RXM_RTCM_MSGUSED_SHIFT;
+
+		if (_gps_position->rtcm_msg_used == sensor_gps_s::RTCM_MSG_USED_USED)
+		{
+			_gps_position->rtcm_last_msg_used_timestamp_us = hrt_absolute_time();
+		}
 
 		/* CSV log: RXM-RTCM brief info */
 		PX4_INFO_RAW("%s,%llu,%u,%u,%u,%u,%u\r\n",
