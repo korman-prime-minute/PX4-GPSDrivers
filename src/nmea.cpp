@@ -76,7 +76,7 @@ GPSDriverNMEA::GPSDriverNMEA(GPSCallbackPtr callback, void *callback_user,
 	_heading_offset(heading_offset)
 {
 	/* Emit CSV header for NMEA GGA so GGA logs are self-describing */
-	PX4_INFO_RAW("GGA,now_us,utc_time,lat,NS,lon,EW,quality,numSV,HDOP,alt,geoid_h,dgps_age\r\n");
+	// PX4_INFO_RAW("GGA,now_us,utc_time,lat,NS,lon,EW,quality,numSV,HDOP,alt,geoid_h,dgps_age\r\n");
 	decodeInit();
 }
 
@@ -357,20 +357,20 @@ int GPSDriverNMEA::handleMessage(int len)
 		_gps_position->c_variance_rad = 0.1f;
 
 		/* CSV log: prefix, now_us, original GGA fields parsed */
-		PX4_INFO_RAW("%s,%llu,%.6f,%.8f,%c,%.8f,%c,%d,%d,%.2f,%.3f,%.3f,%.2f\r\n",
-			NMEA_GGA_PREFIX_LOCAL,
-			(unsigned long long)hrt_absolute_time(),
-			utc_time,
-			lat,
-			ns,
-			lon,
-			ew,
-			fix_quality,
-			num_of_sv,
-			(double)hdop,
-			(double)alt,
-			(double)geoid_h,
-			(double)dgps_age);
+		// PX4_INFO_RAW("%s,%llu,%.6f,%.8f,%c,%.8f,%c,%d,%d,%.2f,%.3f,%.3f,%.2f\r\n",
+		// 	NMEA_GGA_PREFIX_LOCAL,
+		// 	(unsigned long long)hrt_absolute_time(),
+		// 	utc_time,
+		// 	lat,
+		// 	ns,
+		// 	lon,
+		// 	ew,
+		// 	fix_quality,
+		// 	num_of_sv,
+		// 	(double)hdop,
+		// 	(double)alt,
+		// 	(double)geoid_h,
+		// 	(double)dgps_age);
 
 	} else if (memcmp(_rx_buffer + 3, "HDT,", 4) == 0 && fieldCount == 2) {
 		/*
