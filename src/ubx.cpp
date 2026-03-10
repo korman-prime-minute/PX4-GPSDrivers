@@ -120,7 +120,7 @@ GPSDriverUBX::configure(unsigned &baudrate, const GPSConfig &config)
 	if (_interface == Interface::UART) {
 
 		/* try different baudrates */
-		const unsigned baudrates[] = {38400, 57600, 9600, 115200, 230400, 460800, 921600};
+		const unsigned baudrates[] = {57600};
 
 		unsigned baud_i;
 		unsigned desired_baudrate = auto_baudrate ? UBX_BAUDRATE_M8_AND_NEWER : baudrate;
@@ -2035,6 +2035,7 @@ GPSDriverUBX::payloadRxDone()
 		}
 
 		_gps_position->satellites_used	= _buf.payload_rx_nav_pvt.numSV;
+		_gps_position->last_correction_age = (_buf.payload_rx_nav_pvt.flags3 & UBX_RX_NAV_PVT_FLAGS_LAST_CORR_AGE_MASK) >> 1;
 
 		if (_gps_position->fix_type < 99) { // Continue receiving non HPPOS even in RTK mode.
 			// When RTK is active and solid (fix=6), these values will be filled by HPPOSLLH:
@@ -2450,11 +2451,6 @@ GPSDriverUBX::payloadRxDone()
 
 		_gps_position->rtcm_msg_used  = (_buf.payload_rx_rxm_rtcm.flags & UBX_RX_RXM_RTCM_MSGUSED_MASK) >>
 						UBX_RX_RXM_RTCM_MSGUSED_SHIFT;
-
-		if (_gps_position->rtcm_msg_used == sensor_gps_s::RTCM_MSG_USED_USED)
-		{
-			_gps_position->rtcm_last_msg_used_timestamp_us = hrt_absolute_time();
-		}
 
 		// /* CSV log: RXM-RTCM brief info */
 		// PX4_INFO_RAW("%s,%llu,%u,%u,%u,%u,%u\r\n",

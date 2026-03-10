@@ -196,6 +196,7 @@
 #define UBX_RX_NAV_PVT_FLAGS_PSMSTATE           0x1C    /**< psmState (Power Save Mode state (see Power Management)) */
 #define UBX_RX_NAV_PVT_FLAGS_HEADVEHVALID       0x20    /**< headVehValid (Heading of vehicle is valid) */
 #define UBX_RX_NAV_PVT_FLAGS_CARRSOLN           0xC0    /**< Carrier phase range solution (RTK mode) */
+#define UBX_RX_NAV_PVT_FLAGS_LAST_CORR_AGE_MASK 0x1E 	/**< Age of the most recently received differential correction */
 
 /* RX NAV-TIMEUTC message content details */
 /*   Bitfield "valid" masks */
@@ -527,7 +528,7 @@ typedef struct {
 	uint32_t sAcc;          /**< Speed accuracy estimate [mm/s] */
 	uint32_t headAcc;       /**< Heading accuracy estimate (motion and vehicle) [1e-5 deg] */
 	uint16_t pDOP;          /**< Position DOP [0.01] */
-	uint16_t reserved2;
+	uint16_t flags3; 	/**< Additional flags (see UBX_RX_NAV_PVT_FLAGS_...) */
 	uint32_t reserved3;
 	int32_t  headVeh;       /**< (ubx8+ only) Heading of vehicle (2-D) [1e-5 deg] */
 	uint32_t reserved4;     /**< (ubx8+ only) */
