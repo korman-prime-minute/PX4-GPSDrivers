@@ -198,6 +198,9 @@
 #define UBX_RX_NAV_PVT_FLAGS_CARRSOLN           0xC0    /**< Carrier phase range solution (RTK mode) */
 #define UBX_RX_NAV_PVT_FLAGS_LAST_CORR_AGE_MASK 0x1E 	/**< Age of the most recently received differential correction */
 
+/*   Bitfield "flags3" masks */
+#define UBX_RX_NAV_PVT_FLAGS3_LAST_CORR_AGE	0x001E  /**< lastCorrAge (Age of last correction data) */
+
 /* RX NAV-TIMEUTC message content details */
 /*   Bitfield "valid" masks */
 #define UBX_RX_NAV_TIMEUTC_VALID_VALIDTOW       0x01    /**< validTOW (1 = Valid Time of Week) */
@@ -512,7 +515,7 @@ typedef struct {
 	int32_t  nano;          /**< Fraction of second (UTC) [-1e9...1e9 ns] */
 	uint8_t  fixType;       /**< GNSSfix type: 0 = No fix, 1 = Dead Reckoning only, 2 = 2D fix, 3 = 3d-fix, 4 = GNSS + dead reckoning, 5 = time only fix */
 	uint8_t  flags;         /**< Fix Status Flags (see UBX_RX_NAV_PVT_FLAGS_...) */
-	uint8_t  reserved1;
+	uint8_t  flags2;
 	uint8_t  numSV;         /**< Number of SVs used in Nav Solution */
 	int32_t  lon;           /**< Longitude [1e-7 deg] */
 	int32_t  lat;           /**< Latitude [1e-7 deg] */
@@ -528,8 +531,8 @@ typedef struct {
 	uint32_t sAcc;          /**< Speed accuracy estimate [mm/s] */
 	uint32_t headAcc;       /**< Heading accuracy estimate (motion and vehicle) [1e-5 deg] */
 	uint16_t pDOP;          /**< Position DOP [0.01] */
-	uint16_t flags3; 	/**< Additional flags (see UBX_RX_NAV_PVT_FLAGS_...) */
-	uint32_t reserved3;
+	uint16_t flags3;
+	uint32_t reserved0;
 	int32_t  headVeh;       /**< (ubx8+ only) Heading of vehicle (2-D) [1e-5 deg] */
 	uint32_t reserved4;     /**< (ubx8+ only) */
 } ubx_payload_rx_nav_pvt_t;

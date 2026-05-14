@@ -2062,6 +2062,8 @@ GPSDriverUBX::payloadRxDone()
 		_gps_position->cog_rad		= static_cast<float>(_buf.payload_rx_nav_pvt.headMot) * M_DEG_TO_RAD_F * 1e-5f;
 		_gps_position->c_variance_rad	= static_cast<float>(_buf.payload_rx_nav_pvt.headAcc) * M_DEG_TO_RAD_F * 1e-5f;
 
+		_gps_position->last_correction_age = static_cast<float>(_buf.payload_rx_nav_pvt.flags3 & UBX_RX_NAV_PVT_FLAGS3_LAST_CORR_AGE);
+
 		//Check if time and date fix flags are good
 		if ((_buf.payload_rx_nav_pvt.valid & UBX_RX_NAV_PVT_VALID_VALIDDATE)
 		    && (_buf.payload_rx_nav_pvt.valid & UBX_RX_NAV_PVT_VALID_VALIDTIME)
