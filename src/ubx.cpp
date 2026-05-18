@@ -1975,40 +1975,60 @@ GPSDriverUBX::payloadRxDone()
 	case UBX_MSG_NAV_PVT:
 		UBX_TRACE_RXMSG("Rx NAV-PVT");
 
-		/* CSV log: prefix, now_us, iTOW, year, month, day, hour, min, sec, valid, tAcc, nano,
-		   fixType, flags, numSV, lon, lat, height, hMSL, hAcc, vAcc, velN, velE, velD,
-		   gSpeed, headMot, sAcc, headAcc, pDOP, headVeh */
-		// PX4_INFO_RAW("%s,%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%d,%u,%u,%u,%d,%d,%d,%d,%u,%u,%d,%d,%d,%d,%d,%u,%u,%u,%d\r\n",
-		// 	     UBX_NAV_PVT_PREFIX,
-		// 	     (unsigned long long)hrt_absolute_time(),
-		// 	     (unsigned)_buf.payload_rx_nav_pvt.iTOW,
-		// 	     (unsigned)_buf.payload_rx_nav_pvt.year,
-		// 	     (unsigned)_buf.payload_rx_nav_pvt.month,
-		// 	     (unsigned)_buf.payload_rx_nav_pvt.day,
-		// 	     (unsigned)_buf.payload_rx_nav_pvt.hour,
-		// 	     (unsigned)_buf.payload_rx_nav_pvt.min,
-		// 	     (unsigned)_buf.payload_rx_nav_pvt.sec,
-		// 	     (unsigned)_buf.payload_rx_nav_pvt.valid,
-		// 	     (unsigned)_buf.payload_rx_nav_pvt.tAcc,
-		// 	     (int)_buf.payload_rx_nav_pvt.nano,
-		// 	     (unsigned)_buf.payload_rx_nav_pvt.fixType,
-		// 	     (unsigned)_buf.payload_rx_nav_pvt.flags,
-		// 	     (unsigned)_buf.payload_rx_nav_pvt.numSV,
-		// 	     (int)_buf.payload_rx_nav_pvt.lon,
-		// 	     (int)_buf.payload_rx_nav_pvt.lat,
-		// 	     (int)_buf.payload_rx_nav_pvt.height,
-		// 	     (int)_buf.payload_rx_nav_pvt.hMSL,
-		// 	     (unsigned)_buf.payload_rx_nav_pvt.hAcc,
-		// 	     (unsigned)_buf.payload_rx_nav_pvt.vAcc,
-		// 	     (int)_buf.payload_rx_nav_pvt.velN,
-		// 	     (int)_buf.payload_rx_nav_pvt.velE,
-		// 	     (int)_buf.payload_rx_nav_pvt.velD,
-		// 	     (int)_buf.payload_rx_nav_pvt.gSpeed,
-		// 	     (int)_buf.payload_rx_nav_pvt.headMot,
-		// 	     (unsigned)_buf.payload_rx_nav_pvt.sAcc,
-		// 	     (unsigned)_buf.payload_rx_nav_pvt.headAcc,
-		// 	     (unsigned)_buf.payload_rx_nav_pvt.pDOP,
-		// 	     (int)_buf.payload_rx_nav_pvt.headVeh);
+		/* CSV log of UBX-NAV-PVT per u-blox F9 HPG 1.32 Interface Description (UBX-22008968) p.146-148.
+		 * Split across two PX4_INFO_RAW calls due to per-call print buffer length limit.
+		 *
+		 * Line 1 (prefix + meta + time/date/validity + fix):
+		 *   prefix, now_us, iTOW [ms], year, month, day, hour, min, sec,
+		 *   valid (bitfield), tAcc [ns], nano [ns],
+		 *   fixType, flags (bitfield), flags2 (bitfield), numSV
+		 *
+		 * Line 2 (continuation prefix + position/velocity/accuracy/heading):
+		 *   prefix, now_us, lon [1e-7 deg], lat [1e-7 deg], height [mm], hMSL [mm],
+		 *   hAcc [mm], vAcc [mm], velN [mm/s], velE [mm/s], velD [mm/s],
+		 *   gSpeed [mm/s], headMot [1e-5 deg], sAcc [mm/s], headAcc [1e-5 deg],
+		 *   pDOP [0.01], flags3 (bitfield), reserved0 (5 bytes, printed as u32 low word),
+		 *   headVeh [1e-5 deg]
+		 *
+		 * Note: magDec/magAcc fields from F9 spec are not present in local
+		 *       ubx_payload_rx_nav_pvt_t and are therefore not logged. */
+		PX4_INFO_RAW("%s,%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%d,%u,%u,%u,%u\r\n",
+			     UBX_NAV_PVT_PREFIX,
+			     (unsigned long long)hrt_absolute_time(),
+			     (unsigned)_buf.payload_rx_nav_pvt.iTOW,
+			     (unsigned)_buf.payload_rx_nav_pvt.year,
+			     (unsigned)_buf.payload_rx_nav_pvt.month,
+			     (unsigned)_buf.payload_rx_nav_pvt.day,
+			     (unsigned)_buf.payload_rx_nav_pvt.hour,
+			     (unsigned)_buf.payload_rx_nav_pvt.min,
+			     (unsigned)_buf.payload_rx_nav_pvt.sec,
+			     (unsigned)_buf.payload_rx_nav_pvt.valid,
+			     (unsigned)_buf.payload_rx_nav_pvt.tAcc,
+			     (int)_buf.payload_rx_nav_pvt.nano,
+			     (unsigned)_buf.payload_rx_nav_pvt.fixType,
+			     (unsigned)_buf.payload_rx_nav_pvt.flags,
+			     (unsigned)_buf.payload_rx_nav_pvt.flags2,
+			     (unsigned)_buf.payload_rx_nav_pvt.numSV);
+		PX4_INFO_RAW("%s,%llu,%d,%d,%d,%d,%u,%u,%d,%d,%d,%d,%d,%u,%u,%u,%u,%u,%d\r\n",
+			     UBX_NAV_PVT_PREFIX,
+			     (unsigned long long)hrt_absolute_time(),
+			     (int)_buf.payload_rx_nav_pvt.lon,
+			     (int)_buf.payload_rx_nav_pvt.lat,
+			     (int)_buf.payload_rx_nav_pvt.height,
+			     (int)_buf.payload_rx_nav_pvt.hMSL,
+			     (unsigned)_buf.payload_rx_nav_pvt.hAcc,
+			     (unsigned)_buf.payload_rx_nav_pvt.vAcc,
+			     (int)_buf.payload_rx_nav_pvt.velN,
+			     (int)_buf.payload_rx_nav_pvt.velE,
+			     (int)_buf.payload_rx_nav_pvt.velD,
+			     (int)_buf.payload_rx_nav_pvt.gSpeed,
+			     (int)_buf.payload_rx_nav_pvt.headMot,
+			     (unsigned)_buf.payload_rx_nav_pvt.sAcc,
+			     (unsigned)_buf.payload_rx_nav_pvt.headAcc,
+			     (unsigned)_buf.payload_rx_nav_pvt.pDOP,
+			     (unsigned)_buf.payload_rx_nav_pvt.flags3,
+			     (unsigned)_buf.payload_rx_nav_pvt.reserved0,
+			     (int)_buf.payload_rx_nav_pvt.headVeh);
 
 		//Check if position fix flag is good
 		if ((_buf.payload_rx_nav_pvt.flags & UBX_RX_NAV_PVT_FLAGS_GNSSFIXOK) == 1) {
