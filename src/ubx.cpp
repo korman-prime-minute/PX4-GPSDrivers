@@ -145,90 +145,113 @@ GPSDriverUBX::configure(unsigned &baudrate, const GPSConfig &config)
 			receive(20);
 			decodeInit();
 
+			// === DISABLED PERIPHERAL CONFIG WRITE ===
+			// Originally: probe CFG-VALSET (proto v27+) by configuring UART1 framing
+			// (1 stop bit, 8 data bits, no parity) + enable UBX in/out and disable NMEA.
+			// Useful when host wants the receiver's UART1 to speak pure UBX so the
+			// parser is not polluted by NMEA sentences. Disabled to leave UART1
+			// framing/protocols at whatever the receiver was provisioned with.
 			// try CFG-VALSET: if we get an ACK we know we can use protocol version 27+
 			int cfg_valset_msg_size = initCfgValset();
-			// UART1
-			cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1_STOPBITS, 1, cfg_valset_msg_size);
-			cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1_DATABITS, 0, cfg_valset_msg_size);
-			cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1_PARITY, 0, cfg_valset_msg_size);
-			cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1INPROT_UBX, 1, cfg_valset_msg_size);
-			cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1INPROT_NMEA, 0, cfg_valset_msg_size);
-			cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1OUTPROT_UBX, 1, cfg_valset_msg_size);
-			cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1OUTPROT_NMEA, 0, cfg_valset_msg_size);
-			// TODO: are we ever connected to UART2?
+			(void)cfg_valset_msg_size; // unused once writes commented out
+			// cfg_valset_msg_size = initCfgValset();
+			// // UART1
+			// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1_STOPBITS, 1, cfg_valset_msg_size);
+			// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1_DATABITS, 0, cfg_valset_msg_size);
+			// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1_PARITY, 0, cfg_valset_msg_size);
+			// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1INPROT_UBX, 1, cfg_valset_msg_size);
+			// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1INPROT_NMEA, 0, cfg_valset_msg_size);
+			// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1OUTPROT_UBX, 1, cfg_valset_msg_size);
+			// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1OUTPROT_NMEA, 0, cfg_valset_msg_size);
+			// // TODO: are we ever connected to UART2?
 
 			// Note: USB protocol settings are handled later in the configureDevice function.
 
-			bool cfg_valset_success = false;
+			bool cfg_valset_success = true;
 
-			if (sendMessage(UBX_MSG_CFG_VALSET, (uint8_t *)&_buf, cfg_valset_msg_size)) {
+			// if (sendMessage(UBX_MSG_CFG_VALSET, (uint8_t *)&_buf, cfg_valset_msg_size)) {
 
-				// Note: The M10 comes up sending NMEA sentences at 9600. It can't
-				// respond with an ACK until the current sentence has completed transmission.
-				// This can take over a second so need a large timeout on this particular wait.
-				// Once it has acked this it will turn off the NMEA sentences and all is good
-				// for future transactions.
-				if (waitForAck(UBX_MSG_CFG_VALSET, 2000, true) == 0) {
-					cfg_valset_success = true;
-				}
-			}
+			// 	// Note: The M10 comes up sending NMEA sentences at 9600. It can't
+			// 	// respond with an ACK until the current sentence has completed transmission.
+			// 	// This can take over a second so need a large timeout on this particular wait.
+			// 	// Once it has acked this it will turn off the NMEA sentences and all is good
+			// 	// for future transactions.
+			// 	if (waitForAck(UBX_MSG_CFG_VALSET, 2000, true) == 0) {
+			// 		cfg_valset_success = true;
+			// 	}
+			// }
 
 			if (cfg_valset_success) {
 				_proto_ver_27_or_higher = true;
+				// === DISABLED PERIPHERAL CONFIG WRITE ===
+				// Originally: CFG-VALSET UBX_CFG_KEY_CFG_UART1_BAUDRATE = 57600 — set
+				// the receiver's UART1 baud rate so host and receiver agree on link
+				// speed. Useful when the receiver is currently at a different baud
+				// than the host expects. Disabled: assume receiver is already at
+				// the link baud (host-side setBaudrate() below still runs).
 				// Now we only have to change the baudrate
-				cfg_valset_msg_size = initCfgValset();
+				// cfg_valset_msg_size = initCfgValset();
 				desired_baudrate = 57600;
-				cfgValset<uint32_t>(UBX_CFG_KEY_CFG_UART1_BAUDRATE, desired_baudrate, cfg_valset_msg_size);
-
-				if (!sendMessage(UBX_MSG_CFG_VALSET, (uint8_t *)&_buf, cfg_valset_msg_size)) {
-					continue;
-				}
-
-				/* no ACK is expected here, but read the buffer anyway in case we actually get an ACK */
-				waitForAck(UBX_MSG_CFG_VALSET, UBX_CONFIG_TIMEOUT, false);
+				// cfgValset<uint32_t>(UBX_CFG_KEY_CFG_UART1_BAUDRATE, desired_baudrate, cfg_valset_msg_size);
+				//
+				// if (!sendMessage(UBX_MSG_CFG_VALSET, (uint8_t *)&_buf, cfg_valset_msg_size)) {
+				// 	continue;
+				// }
+				//
+				// /* no ACK is expected here, but read the buffer anyway in case we actually get an ACK */
+				// waitForAck(UBX_MSG_CFG_VALSET, UBX_CONFIG_TIMEOUT, false);
 
 			} else {
 				_proto_ver_27_or_higher = false;
 
 				UBX_DEBUG("trying old protocol");
 
-				/* Send a CFG-PRT message to set the UBX protocol for in and out
-				 * and leave the baudrate as it is, we just want an ACK-ACK for this */
-				memset(cfg_prt, 0, 2 * sizeof(ubx_payload_tx_cfg_prt_t));
-				cfg_prt[0].portID		= UBX_TX_CFG_PRT_PORTID;
-				cfg_prt[0].mode		= UBX_TX_CFG_PRT_MODE;
-				cfg_prt[0].baudRate	= test_baudrate;
-				cfg_prt[0].inProtoMask	= in_proto_mask;
-				cfg_prt[0].outProtoMask	= out_proto_mask;
-				cfg_prt[1].portID		= UBX_TX_CFG_PRT_PORTID_USB;
-				cfg_prt[1].mode		= UBX_TX_CFG_PRT_MODE;
-				cfg_prt[1].baudRate	= test_baudrate;
-				cfg_prt[1].inProtoMask	= in_proto_mask;
-				cfg_prt[1].outProtoMask	= out_proto_mask;
-
-				if (!sendMessage(UBX_MSG_CFG_PRT, (uint8_t *)cfg_prt, 2 * sizeof(ubx_payload_tx_cfg_prt_t))) {
-					continue;
-				}
-
-				if (waitForAck(UBX_MSG_CFG_PRT, UBX_CONFIG_TIMEOUT, false) < 0) {
-					/* try next baudrate */
-					continue;
-				}
+				// === DISABLED PERIPHERAL CONFIG WRITE ===
+				// Originally (pre-v27 fallback): two CFG-PRT messages.
+				// 1st - tell receiver's UART1 + USB ports to accept UBX (and RTCM
+				//       when running as RTCM in/out) and emit only UBX/RTCM, at
+				//       the currently-probed baud rate.
+				// 2nd - change the receiver's UART1/USB baud rate to desired_baudrate.
+				// Useful on legacy u-blox 5/6/7/8 modules that lack the
+				// configuration database. Disabled to leave port settings as
+				// provisioned; we still suppress this code path by suppressing
+				// re-probing, and (void) avoids unused-var warnings.
+				(void)cfg_prt; (void)in_proto_mask; (void)out_proto_mask; (void)test_baudrate;
+				// memset(cfg_prt, 0, 2 * sizeof(ubx_payload_tx_cfg_prt_t));
+				// cfg_prt[0].portID       = UBX_TX_CFG_PRT_PORTID;
+				// cfg_prt[0].mode         = UBX_TX_CFG_PRT_MODE;
+				// cfg_prt[0].baudRate     = test_baudrate;
+				// cfg_prt[0].inProtoMask  = in_proto_mask;
+				// cfg_prt[0].outProtoMask = out_proto_mask;
+				// cfg_prt[1].portID       = UBX_TX_CFG_PRT_PORTID_USB;
+				// cfg_prt[1].mode         = UBX_TX_CFG_PRT_MODE;
+				// cfg_prt[1].baudRate     = test_baudrate;
+				// cfg_prt[1].inProtoMask  = in_proto_mask;
+				// cfg_prt[1].outProtoMask = out_proto_mask;
+				//
+				// if (!sendMessage(UBX_MSG_CFG_PRT, (uint8_t *)cfg_prt, 2 * sizeof(ubx_payload_tx_cfg_prt_t))) {
+				// 	continue;
+				// }
+				//
+				// if (waitForAck(UBX_MSG_CFG_PRT, UBX_CONFIG_TIMEOUT, false) < 0) {
+				// 	/* try next baudrate */
+				// 	continue;
+				// }
 
 				if (auto_baudrate) {
 					desired_baudrate = UBX_TX_CFG_PRT_BAUDRATE;
 				}
 
-				/* Send a CFG-PRT message again, this time change the baudrate */
-				cfg_prt[0].baudRate	= desired_baudrate;
-				cfg_prt[1].baudRate	= desired_baudrate;
-
-				if (!sendMessage(UBX_MSG_CFG_PRT, (uint8_t *)cfg_prt, 2 * sizeof(ubx_payload_tx_cfg_prt_t))) {
-					continue;
-				}
-
-				/* no ACK is expected here, but read the buffer anyway in case we actually get an ACK */
-				waitForAck(UBX_MSG_CFG_PRT, UBX_CONFIG_TIMEOUT, false);
+				// /* Send a CFG-PRT message again, this time change the baudrate */
+				// cfg_prt[0].baudRate = desired_baudrate;
+				// cfg_prt[1].baudRate = desired_baudrate;
+				//
+				// if (!sendMessage(UBX_MSG_CFG_PRT, (uint8_t *)cfg_prt, 2 * sizeof(ubx_payload_tx_cfg_prt_t))) {
+				// 	continue;
+				// }
+				//
+				// /* no ACK is expected here, but read the buffer anyway in case we actually get an ACK */
+				// waitForAck(UBX_MSG_CFG_PRT, UBX_CONFIG_TIMEOUT, false);
 			}
 
 			if (desired_baudrate != test_baudrate) {
@@ -250,78 +273,94 @@ GPSDriverUBX::configure(unsigned &baudrate, const GPSConfig &config)
 
 	} else if (_interface == Interface::SPI) {
 
-		// try CFG-VALSET: if we get an ACK we know we can use protocol version 27+
-		int cfg_valset_msg_size = initCfgValset();
-		cfgValset<uint8_t>(UBX_CFG_KEY_SPI_ENABLED, 1, cfg_valset_msg_size);
-		cfgValset<uint8_t>(UBX_CFG_KEY_SPI_MAXFF, 1, cfg_valset_msg_size);
-		cfgValset<uint8_t>(UBX_CFG_KEY_CFG_SPIINPROT_UBX, 1, cfg_valset_msg_size);
-		cfgValset<uint8_t>(UBX_CFG_KEY_CFG_SPIINPROT_RTCM3X, _output_mode == OutputMode::RTCM ? 0 : 1, cfg_valset_msg_size);
-		cfgValset<uint8_t>(UBX_CFG_KEY_CFG_SPIINPROT_NMEA, 0, cfg_valset_msg_size);
-		cfgValset<uint8_t>(UBX_CFG_KEY_CFG_SPIOUTPROT_UBX, 1, cfg_valset_msg_size);
-		cfgValset<uint8_t>(UBX_CFG_KEY_CFG_SPIOUTPROT_RTCM3X, _output_mode == OutputMode::GPS ? 0 : 1, cfg_valset_msg_size);
-		cfgValset<uint8_t>(UBX_CFG_KEY_CFG_SPIOUTPROT_NMEA, 0, cfg_valset_msg_size);
-
-		bool cfg_valset_success = false;
-
-		if (sendMessage(UBX_MSG_CFG_VALSET, (uint8_t *)&_buf, cfg_valset_msg_size)) {
-
-			if (waitForAck(UBX_MSG_CFG_VALSET, UBX_CONFIG_TIMEOUT, true) == 0) {
-				cfg_valset_success = true;
-			}
-		}
-
-		if (cfg_valset_success) {
-			_proto_ver_27_or_higher = true;
-
-		} else {
-			_proto_ver_27_or_higher = false;
-			memset(cfg_prt, 0, sizeof(ubx_payload_tx_cfg_prt_t));
-			cfg_prt[0].portID		= UBX_TX_CFG_PRT_PORTID_SPI;
-			cfg_prt[0].mode			= UBX_TX_CFG_PRT_MODE_SPI;
-			cfg_prt[0].inProtoMask	= in_proto_mask;
-			cfg_prt[0].outProtoMask	= out_proto_mask;
-
-			if (!sendMessage(UBX_MSG_CFG_PRT, (uint8_t *)cfg_prt, sizeof(ubx_payload_tx_cfg_prt_t))) {
-				return -1;
-			}
-
-			waitForAck(UBX_MSG_CFG_PRT, UBX_CONFIG_TIMEOUT, false);
-		}
+		// === DISABLED PERIPHERAL CONFIG WRITE ===
+		// Originally: CFG-VALSET probe over SPI to enable the SPI peripheral on
+		// the receiver, set the SPI MAXFF (max number of trailing 0xFF before
+		// the receiver stops sending filler), and enable UBX (+RTCM in/out per
+		// _output_mode) while disabling NMEA. Useful to make the receiver's SPI
+		// port speak only the protocols this driver parses. Disabled: leaves
+		// SPI port protocol set as provisioned. Assume v27+ so the rest of the
+		// driver follows the modern code path (matches UART branch behavior).
+		// int cfg_valset_msg_size = initCfgValset();
+		// cfgValset<uint8_t>(UBX_CFG_KEY_SPI_ENABLED, 1, cfg_valset_msg_size);
+		// cfgValset<uint8_t>(UBX_CFG_KEY_SPI_MAXFF, 1, cfg_valset_msg_size);
+		// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_SPIINPROT_UBX, 1, cfg_valset_msg_size);
+		// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_SPIINPROT_RTCM3X, _output_mode == OutputMode::RTCM ? 0 : 1, cfg_valset_msg_size);
+		// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_SPIINPROT_NMEA, 0, cfg_valset_msg_size);
+		// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_SPIOUTPROT_UBX, 1, cfg_valset_msg_size);
+		// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_SPIOUTPROT_RTCM3X, _output_mode == OutputMode::GPS ? 0 : 1, cfg_valset_msg_size);
+		// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_SPIOUTPROT_NMEA, 0, cfg_valset_msg_size);
+		//
+		// bool cfg_valset_success = false;
+		//
+		// if (sendMessage(UBX_MSG_CFG_VALSET, (uint8_t *)&_buf, cfg_valset_msg_size)) {
+		// 	if (waitForAck(UBX_MSG_CFG_VALSET, UBX_CONFIG_TIMEOUT, true) == 0) {
+		// 		cfg_valset_success = true;
+		// 	}
+		// }
+		//
+		// if (cfg_valset_success) {
+		// 	_proto_ver_27_or_higher = true;
+		// } else {
+		// === DISABLED PERIPHERAL CONFIG WRITE (pre-v27 SPI fallback) ===
+		// Originally: CFG-PRT on the SPI port to set SPI mode bits and the
+		// in/out protocol masks (UBX, optionally RTCM3X). Same purpose as the
+		// CFG-VALSET above, for receivers without the v27 config DB.
+		// 	_proto_ver_27_or_higher = false;
+		// 	memset(cfg_prt, 0, sizeof(ubx_payload_tx_cfg_prt_t));
+		// 	cfg_prt[0].portID       = UBX_TX_CFG_PRT_PORTID_SPI;
+		// 	cfg_prt[0].mode         = UBX_TX_CFG_PRT_MODE_SPI;
+		// 	cfg_prt[0].inProtoMask  = in_proto_mask;
+		// 	cfg_prt[0].outProtoMask = out_proto_mask;
+		//
+		// 	if (!sendMessage(UBX_MSG_CFG_PRT, (uint8_t *)cfg_prt, sizeof(ubx_payload_tx_cfg_prt_t))) {
+		// 		return -1;
+		// 	}
+		//
+		// 	waitForAck(UBX_MSG_CFG_PRT, UBX_CONFIG_TIMEOUT, false);
+		// }
+		_proto_ver_27_or_higher = true; // assume modern receiver; no probe sent
 
 	} else {
 		return -1;
 	}
 
-	UBX_DEBUG("Protocol version 27+: %i", static_cast<int>(_proto_ver_27_or_higher));
+	// UBX_DEBUG("Protocol version 27+: %i", static_cast<int>(_proto_ver_27_or_higher));
 
 	/* Request module version information by sending an empty MON-VER message */
-	if (!sendMessage(UBX_MSG_MON_VER, nullptr, 0)) {
-		return -1;
-	}
+	// if (!sendMessage(UBX_MSG_MON_VER, nullptr, 0)) {
+	// 	return -1;
+	// }
 
-	/* Wait for the reply so that we know to which device we're connected (_board will be set).
-	 * Note: we won't actually get an ACK-ACK, but UBX_MSG_MON_VER will also set the ack state.
-	 */
-	if (waitForAck(UBX_MSG_MON_VER, UBX_CONFIG_TIMEOUT, true) < 0) {
-		return -1;
-	}
+	// /* Wait for the reply so that we know to which device we're connected (_board will be set).
+	//  * Note: we won't actually get an ACK-ACK, but UBX_MSG_MON_VER will also set the ack state.
+	//  */
+	// if (waitForAck(UBX_MSG_MON_VER, UBX_CONFIG_TIMEOUT, true) < 0) {
+	// 	return -1;
+	// }
 
 
-	/* Now that we know the board, update the baudrate on M8 boards (on F9+ we already used the
-	 * higher baudrate with CFG-VALSET) */
-	if (_interface == Interface::UART && auto_baudrate && _board == Board::u_blox8) {
-
-		cfg_prt[0].baudRate	= UBX_BAUDRATE_M8_AND_NEWER;
-		cfg_prt[1].baudRate	= UBX_BAUDRATE_M8_AND_NEWER;
-
-		if (sendMessage(UBX_MSG_CFG_PRT, (uint8_t *)cfg_prt, 2 * sizeof(ubx_payload_tx_cfg_prt_t))) {
-			/* no ACK is expected here, but read the buffer anyway in case we actually get an ACK */
-			waitForAck(UBX_MSG_CFG_PRT, UBX_CONFIG_TIMEOUT, false);
-
-			setBaudrate(UBX_BAUDRATE_M8_AND_NEWER);
-			baudrate = UBX_BAUDRATE_M8_AND_NEWER;
-		}
-	}
+	// === DISABLED PERIPHERAL CONFIG WRITE ===
+	// Originally: on u-blox 8 modules in auto-baud mode, push the receiver's
+	// UART1 + USB baud rate up to the M8+ default (CFG-PRT). Useful to step up
+	// from the initial slow probe baud to a higher link rate now that the
+	// board is identified. Disabled - we keep whatever baud the link probe
+	// settled on and do not touch the receiver's port config.
+	// /* Now that we know the board, update the baudrate on M8 boards (on F9+ we already used the
+	//  * higher baudrate with CFG-VALSET) */
+	// if (_interface == Interface::UART && auto_baudrate && _board == Board::u_blox8) {
+	//
+	// 	cfg_prt[0].baudRate = UBX_BAUDRATE_M8_AND_NEWER;
+	// 	cfg_prt[1].baudRate = UBX_BAUDRATE_M8_AND_NEWER;
+	//
+	// 	if (sendMessage(UBX_MSG_CFG_PRT, (uint8_t *)cfg_prt, 2 * sizeof(ubx_payload_tx_cfg_prt_t))) {
+	// 		/* no ACK is expected here, but read the buffer anyway in case we actually get an ACK */
+	// 		waitForAck(UBX_MSG_CFG_PRT, UBX_CONFIG_TIMEOUT, false);
+	//
+	// 		setBaudrate(UBX_BAUDRATE_M8_AND_NEWER);
+	// 		baudrate = UBX_BAUDRATE_M8_AND_NEWER;
+	// 	}
+	// }
 
 	if (_output_mode == OutputMode::GPSAndRTCM || _output_mode == OutputMode::RTCM || _mode == UBXMode::MovingBaseUART1) {
 		if (!_rtcm_parsing) {
@@ -370,6 +409,28 @@ GPSDriverUBX::configure(unsigned &baudrate, const GPSConfig &config)
 
 int GPSDriverUBX::configureDevicePreV27(const GNSSSystemsMask &gnssSystems)
 {
+	// === DISABLED PERIPHERAL CONFIG WRITES (entire pre-v27 init) ===
+	// Originally configures legacy u-blox 6/7/8 receivers via the old
+	// per-message UBX-CFG-* commands:
+	//   * CFG-RATE   : measurement + navigation solution rate, and time reference
+	//                  (GPS/GLONASS/UTC). Sets how often the receiver computes a fix.
+	//   * CFG-NAV5   : navigation engine settings - dynamic platform model
+	//                  (airborne/automotive/etc.), 2D/3D fix mode, masks. Tunes
+	//                  Kalman filter behavior for the expected motion profile.
+	//   * CFG-GNSS   : which constellations + signals to track (GPS+QZSS, SBAS,
+	//                  Galileo, BeiDou, GLONASS, IMES) and channel allocations.
+	//                  Useful to enable/disable specific GNSS systems.
+	//   * CFG-MSG    : per-message output-rate selectors for NAV-PVT/POSLLH/SOL/
+	//                  VELNED/TIMEUTC/STATUS/DOP/SVINFO and MON-HW. Tells the
+	//                  receiver which solution/status messages to stream and how
+	//                  often (divisor of measurement rate).
+	// All of these are useful when you want PX4 to dictate fix rate, motion
+	// model, constellation mix, and message stream. Disabled here so the
+	// receiver keeps whatever rate/model/constellations/messages were
+	// provisioned externally (e.g. via u-center).
+	(void)gnssSystems;
+	return 0;
+#if 0
 	/* Send a CFG-RATE message to define update rate */
 	memset(&_buf.payload_tx_cfg_rate, 0, sizeof(_buf.payload_tx_cfg_rate));
 	_buf.payload_tx_cfg_rate.measRate	= UBX_TX_CFG_RATE_MEASINTERVAL;
@@ -525,10 +586,48 @@ int GPSDriverUBX::configureDevicePreV27(const GNSSSystemsMask &gnssSystems)
 	}
 
 	return 0;
+#endif // configureDevicePreV27 body disabled
 }
 
 int GPSDriverUBX::configureDevice(const GPSConfig &config, const int32_t uart2_baudrate)
 {
+	// === DISABLED PERIPHERAL CONFIG WRITES (entire v27+ init) ===
+	// Originally configures modern u-blox 9/10/F9P receivers via CFG-VALSET
+	// over the v27 configuration database. The full pipeline:
+	//   * Port protocols (CFG-*INPROT/OUTPROT) for UART1, USB, I2C - controls
+	//     which protocols (UBX / RTCM3 / NMEA) the receiver accepts and emits
+	//     on each physical port. Useful to silence NMEA and gate RTCM in/out.
+	//   * NAVSPG-FIXMODE / NAVSPG-UTCSTANDARD / NAVSPG-DYNMODEL - 2D/3D mode
+	//     selection, UTC standard (USNO/GPS/etc.), dynamic-platform model.
+	//     Tunes the navigation engine for the expected vehicle dynamics.
+	//   * ODO_* - odometer + low-pass filters on velocity/COG. Disabled for
+	//     unfiltered raw outputs.
+	//   * RATE_MEAS / RATE_NAV / RATE_TIMEREF - measurement period, nav rate,
+	//     time reference (e.g. 100 ms -> 10 Hz fix; F9P up to 20 Hz).
+	//   * NAVHPG_DGNSSMODE - select RTK fixed/float. Required to get fixed
+	//     carrier-phase RTK fixes on F9P.
+	//   * ITFM_ENABLE - jamming/interference monitor (drives jamming_indicator
+	//     in MON-HW/MON-RF). Useful for interference diagnostics.
+	//   * SIGNAL_*_ENA - per-band signal selectors (GPS L1/L2/L5, GAL E1/E5A/E5B,
+	//     BDS B1/B2/B2A, GLO L1, QZSS, SBAS L1, NavIC L5). Controls which
+	//     constellation/band combinations the receiver tracks.
+	//   * MSGOUT_UBX_NAV_*_I2C - per-message stream rates on the
+	//     I2C/UART/USB port (NAV-PVT, NAV-DOP, NAV-SAT, NAV-STATUS, NAV-HPPOSLLH,
+	//     NAV-RELPOSNED, MON-RF, RXM-RTCM). cfgValsetPort() fans the same key
+	//     out to UART1/USB or SPI. Tells the receiver which solution/status
+	//     messages to emit and how often.
+	//   * UART2 protocol/baud + RTCM type 1005/1074/1084/1094/1124/4072 outputs
+	//     (moving-base or static-base modes). Lets the receiver feed
+	//     correction data over UART2 to/from a paired base/rover.
+	//   * UART1 protocol setup for RoverWithMovingBaseUART1 / MovingBaseUART1
+	//     (single-cable heading configurations).
+	// Disabled here: receiver is assumed to be fully provisioned externally
+	// (u-center / pre-flashed config). PX4 just consumes whatever NAV-* /
+	// MON-* / RXM-RTCM stream the receiver already emits.
+	(void)config;
+	(void)uart2_baudrate;
+	return 0;
+#if 0
 	// There is no RTCM or USB interface on M10
 	if (_board != Board::u_blox10) {
 
@@ -928,6 +1027,7 @@ int GPSDriverUBX::configureDevice(const GPSConfig &config, const int32_t uart2_b
 	}
 
 	return 0;
+#endif // configureDevice body disabled
 }
 
 int GPSDriverUBX::initCfgValset()
@@ -980,6 +1080,26 @@ bool GPSDriverUBX::cfgValsetPort(uint32_t key_id, uint8_t value, int &msg_size)
 
 int GPSDriverUBX::restartSurveyInPreV27()
 {
+	// === DISABLED PERIPHERAL CONFIG WRITES (pre-v27 base-station setup) ===
+	// Originally drives the receiver into Time Mode 3 (base station) on legacy
+	// modules:
+	//   * CFG-MSG rate=0 for RTCM3 types 1005/1077/1087/1230/1097/1127 - turn
+	//     off any pre-existing RTCM3 output streams before reconfiguring.
+	//   * CFG-TMODE3 flags=0 - disable any active Time Mode (stop survey-in or
+	//     fixed-position mode cleanly).
+	//   * CFG-TMODE3 flags=1 + svinMinDur + svinAccLimit - start a survey-in:
+	//     receiver averages its own position until duration/accuracy thresholds
+	//     are met. Used to auto-determine a base-station coordinate.
+	//   * CFG-MSG NAV-SVIN at 5 Hz - enable survey-in status output so the host
+	//     can monitor progress.
+	//   * CFG-TMODE3 flags=2|lat/lon mode + ecef[XYZ]Lat/Lon/Alt + HP parts +
+	//     fixedPosAcc - configure fixed-base mode at a known surveyed position.
+	//     Used when the base coordinate is already known precisely.
+	// Useful for setting up an RTCM correction source. Disabled - we do not
+	// operate this driver as a base station; survey-in / fixed-base must be
+	// pre-provisioned in the receiver if needed.
+	return 0;
+#if 0
 	//disable RTCM output
 	configureMessageRate(UBX_MSG_RTCM3_1005, 0);
 	configureMessageRate(UBX_MSG_RTCM3_1077, 0);
@@ -1055,10 +1175,27 @@ int GPSDriverUBX::restartSurveyInPreV27()
 	}
 
 	return 0;
+#endif // restartSurveyInPreV27 body disabled
 }
 
 int GPSDriverUBX::restartSurveyIn()
 {
+	// === DISABLED PERIPHERAL CONFIG WRITES (v27+ base-station setup) ===
+	// Same intent as restartSurveyInPreV27 but on modern receivers via
+	// CFG-VALSET / config DB:
+	//   * MSGOUT_RTCM_3X_TYPE{1005,1077,1087,1230,1097,1127}_* = 0 - silence
+	//     any existing RTCM3 base-station message outputs before reconfig.
+	//   * TMODE_MODE = 1 (Survey-in) + TMODE_SVIN_MIN_DUR/ACC_LIMIT - start a
+	//     self-survey: the receiver averages its position until threshold met.
+	//   * MSGOUT_UBX_NAV_SVIN = 5 - stream survey-in status to host.
+	//   * TMODE_MODE = 2 (Fixed) + TMODE_POS_TYPE=1 (lat/lon/height) +
+	//     LAT/LON/HEIGHT (with HP fractional parts) + FIXED_POS_ACC -
+	//     program a precisely surveyed base coordinate.
+	// Same purpose: configure the receiver as an RTK base station emitting
+	// RTCM corrections. Disabled - this driver runs as rover; do not push
+	// any base-station config to the peripheral.
+	return 0;
+#if 0
 	if (_output_mode != OutputMode::RTCM) {
 		return -1;
 	}
@@ -1128,6 +1265,7 @@ int GPSDriverUBX::restartSurveyIn()
 	}
 
 	return 0;
+#endif // restartSurveyIn body disabled
 }
 
 int	// -1 = NAK, error or timeout, 0 = ACK
@@ -1284,6 +1422,7 @@ GPSDriverUBX::parseChar(const uint8_t b)
 		_rx_payload_length |= b << 8;	// calculate payload size
 
 		if (payloadRxInit() != 0) {	// start payload reception
+			PX4_WARN("UBX_DECODE_LENGTH2: payload discarded");
 			// payload will not be handled, discard message
 			decodeInit();
 
@@ -1317,6 +1456,7 @@ GPSDriverUBX::parseChar(const uint8_t b)
 		}
 
 		if (ret < 0) {
+			PX4_WARN("UBX_DECODE_PAYLOAD: payload discarded");
 			// payload not handled, discard message
 			decodeInit();
 
@@ -1593,49 +1733,58 @@ GPSDriverUBX::payloadRxInit()
 	case UBX_RXMSG_DISABLE:	// disable unexpected messages
 		UBX_DEBUG("ubx msg 0x%04x len %u unexpected", SWAP16((unsigned)_rx_msg), (unsigned)_rx_payload_length);
 
-		if (_proto_ver_27_or_higher) {
-			uint32_t key_id = 0;
-
-			switch (_rx_msg) { // we cannot infer the config Key ID from _rx_msg for protocol version 27+
-			case UBX_MSG_RXM_RAWX:
-				key_id = UBX_CFG_KEY_MSGOUT_UBX_RXM_RAWX_I2C;
-				break;
-
-			case UBX_MSG_RXM_SFRBX:
-				key_id = UBX_CFG_KEY_MSGOUT_UBX_RXM_SFRBX_I2C;
-				break;
-
-			case UBX_MSG_NAV_TIMEGPS:
-				key_id = UBX_CFG_KEY_MSGOUT_UBX_NAV_TIMEGPS_I2C;
-				break;
-			}
-
-			if (key_id != 0) {
-				gps_abstime t = gps_absolute_time();
-
-				if (t > _disable_cmd_last + DISABLE_MSG_INTERVAL && _configured) {
-					/* don't attempt for every message to disable, some might not be disabled */
-					_disable_cmd_last = t;
-					UBX_DEBUG("ubx disabling msg 0x%04x (0x%04x)", SWAP16((unsigned)_rx_msg), (uint16_t)key_id);
-
-					// this will overwrite _buf, which is fine, as we'll return -1 and abort further parsing
-					int cfg_valset_msg_size = initCfgValset();
-					cfgValsetPort(key_id, 0, cfg_valset_msg_size);
-					sendMessage(UBX_MSG_CFG_VALSET, (uint8_t *)&_buf, cfg_valset_msg_size);
-				}
-			}
-
-		} else {
-			gps_abstime t = gps_absolute_time();
-
-			if (t > _disable_cmd_last + DISABLE_MSG_INTERVAL) {
-				/* don't attempt for every message to disable, some might not be disabled */
-				_disable_cmd_last = t;
-				UBX_DEBUG("ubx disabling msg 0x%04x", SWAP16((unsigned)_rx_msg));
-
-				configureMessageRate(_rx_msg, 0);
-			}
-		}
+		// === DISABLED PERIPHERAL CONFIG WRITE (auto-silence path) ===
+		// Originally: when the driver decodes a UBX message it didn't ask for
+		// (RXM-RAWX, RXM-SFRBX, NAV-TIMEGPS on v27+, or any unhandled msg on
+		// pre-v27), throttle-then-send CFG-VALSET MSGOUT=0 (v27+) or CFG-MSG
+		// rate=0 (pre-v27) to tell the receiver to stop emitting it.
+		// Useful to clean up bandwidth on links shared with other tools or
+		// when the receiver's previous config left extra streams enabled.
+		// Disabled - never push silence commands; just discard the unwanted
+		// message and continue.
+		// if (_proto_ver_27_or_higher) {
+		// 	uint32_t key_id = 0;
+		//
+		// 	switch (_rx_msg) { // we cannot infer the config Key ID from _rx_msg for protocol version 27+
+		// 	case UBX_MSG_RXM_RAWX:
+		// 		key_id = UBX_CFG_KEY_MSGOUT_UBX_RXM_RAWX_I2C;
+		// 		break;
+		//
+		// 	case UBX_MSG_RXM_SFRBX:
+		// 		key_id = UBX_CFG_KEY_MSGOUT_UBX_RXM_SFRBX_I2C;
+		// 		break;
+		//
+		// 	case UBX_MSG_NAV_TIMEGPS:
+		// 		key_id = UBX_CFG_KEY_MSGOUT_UBX_NAV_TIMEGPS_I2C;
+		// 		break;
+		// 	}
+		//
+		// 	if (key_id != 0) {
+		// 		gps_abstime t = gps_absolute_time();
+		//
+		// 		if (t > _disable_cmd_last + DISABLE_MSG_INTERVAL && _configured) {
+		// 			/* don't attempt for every message to disable, some might not be disabled */
+		// 			_disable_cmd_last = t;
+		// 			UBX_DEBUG("ubx disabling msg 0x%04x (0x%04x)", SWAP16((unsigned)_rx_msg), (uint16_t)key_id);
+		//
+		// 			// this will overwrite _buf, which is fine, as we'll return -1 and abort further parsing
+		// 			int cfg_valset_msg_size = initCfgValset();
+		// 			cfgValsetPort(key_id, 0, cfg_valset_msg_size);
+		// 			sendMessage(UBX_MSG_CFG_VALSET, (uint8_t *)&_buf, cfg_valset_msg_size);
+		// 		}
+		// 	}
+		//
+		// } else {
+		// 	gps_abstime t = gps_absolute_time();
+		//
+		// 	if (t > _disable_cmd_last + DISABLE_MSG_INTERVAL) {
+		// 		/* don't attempt for every message to disable, some might not be disabled */
+		// 		_disable_cmd_last = t;
+		// 		UBX_DEBUG("ubx disabling msg 0x%04x", SWAP16((unsigned)_rx_msg));
+		//
+		// 		configureMessageRate(_rx_msg, 0);
+		// 	}
+		// }
 
 		ret = -1;	// return error, abort handling this message
 		break;
@@ -1992,9 +2141,19 @@ GPSDriverUBX::payloadRxDone()
 		 *
 		 * Note: magDec/magAcc fields from F9 spec are not present in local
 		 *       ubx_payload_rx_nav_pvt_t and are therefore not logged. */
+		{
+		#define NAV_PVT_MIN_PERIOD_US (44000)
+		hrt_abstime now = hrt_absolute_time();
+		static hrt_abstime now_prev = 0;
+		if (now_prev != 0 && hrt_elapsed_time(&now_prev) > NAV_PVT_MIN_PERIOD_US) {
+			PX4_WARN("UBX NAV-PVT time jump detected - %ums (%dHz)", (unsigned int)hrt_elapsed_time(&now_prev), (uint8_t)(1000000 / hrt_elapsed_time(&now_prev)));
+		}
+
+		now_prev = now;
+
 		PX4_INFO_RAW("%s,%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%d,%u,%u,%u,%u\r\n",
 			     UBX_NAV_PVT_PREFIX,
-			     (unsigned long long)hrt_absolute_time(),
+			     (unsigned long long)now,
 			     (unsigned)_buf.payload_rx_nav_pvt.iTOW,
 			     (unsigned)_buf.payload_rx_nav_pvt.year,
 			     (unsigned)_buf.payload_rx_nav_pvt.month,
@@ -2011,7 +2170,7 @@ GPSDriverUBX::payloadRxDone()
 			     (unsigned)_buf.payload_rx_nav_pvt.numSV);
 		PX4_INFO_RAW("%s,%llu,%d,%d,%d,%d,%u,%u,%d,%d,%d,%d,%d,%u,%u,%u,%u,%u,%d\r\n",
 			     UBX_NAV_PVT_PREFIX,
-			     (unsigned long long)hrt_absolute_time(),
+			     (unsigned long long)now,
 			     (int)_buf.payload_rx_nav_pvt.lon,
 			     (int)_buf.payload_rx_nav_pvt.lat,
 			     (int)_buf.payload_rx_nav_pvt.height,
@@ -2131,6 +2290,7 @@ GPSDriverUBX::payloadRxDone()
 		_got_velned = true;
 
 		ret = 1;
+		}
 		break;
 
 	case UBX_MSG_INF_DEBUG:
@@ -2521,6 +2681,27 @@ GPSDriverUBX::payloadRxDone()
 int
 GPSDriverUBX::activateRTCMOutput(bool reduce_update_rate)
 {
+	// === DISABLED PERIPHERAL CONFIG WRITES (RTCM3 output activation) ===
+	// Originally enables a base-station's RTCM3 correction stream:
+	//   * RATE_MEAS (or CFG-RATE on pre-v27) = 1000 ms - drop receiver to 1 Hz
+	//     fix rate when reduce_update_rate is set, since base RTCM streams
+	//     only need 1 Hz. (Survey-in keeps higher rate to speed convergence.)
+	//   * MSGOUT_RTCM_3X_TYPE1005=5, TYPE1077/1087/1097/1127/1230=1 -
+	//     enable the receiver's RTCM3 output on each port (or via CFG-MSG on
+	//     pre-v27):
+	//       1005: stationary RTK reference-station ARP (every 5 epochs).
+	//       1077: GPS MSM7 observables.
+	//       1087: GLONASS MSM7 observables.
+	//       1097: Galileo MSM7 observables.
+	//       1127: BeiDou MSM7 observables.
+	//       1230: GLONASS code-phase biases.
+	//   * MSGOUT_UBX_NAV_SVIN = 0 - stop survey-in status messages now that
+	//     survey is complete and RTCM output has taken over.
+	// Useful only when this device is the RTK base broadcasting corrections.
+	// Disabled - rover does not generate RTCM3 output.
+	(void)reduce_update_rate;
+	return 0;
+#if 0
 	/* For base stations we switch to 1 Hz update rate, which is enough for RTCM output.
 	 * For the survey-in, we still want 5/10 Hz, because this speeds up the process */
 
@@ -2582,6 +2763,7 @@ GPSDriverUBX::activateRTCMOutput(bool reduce_update_rate)
 	}
 
 	return 0;
+#endif // activateRTCMOutput body disabled
 }
 
 void
@@ -2613,6 +2795,18 @@ GPSDriverUBX::calcChecksum(const uint8_t *buffer, const uint16_t length, ubx_che
 bool
 GPSDriverUBX::configureMessageRate(const uint16_t msg, const uint8_t rate)
 {
+	// === DISABLED PERIPHERAL CONFIG WRITE (legacy CFG-MSG) ===
+	// Originally: build a UBX-CFG-MSG packet selecting one message class/ID
+	// and its output rate (0 = off, N = once every N nav epochs), then send
+	// it to the receiver. Used by the pre-v27 init path to subscribe the
+	// host to NAV-*, MON-*, RTCM3-* streams, and by the auto-disable branch
+	// in payloadRxInit() to silence unexpected messages. Useful to control
+	// which streams the receiver emits on legacy hardware. Disabled - do
+	// not push any CFG-MSG rate changes; return true so callers that check
+	// the boolean don't treat absence as failure.
+	(void)msg; (void)rate;
+	return true;
+#if 0
 	if (_proto_ver_27_or_higher) {
 		// configureMessageRate() should not be called if _proto_ver_27_or_higher is true.
 		// If you see this message the calling code needs to be fixed.
@@ -2626,6 +2820,7 @@ GPSDriverUBX::configureMessageRate(const uint16_t msg, const uint8_t rate)
 	cfg_msg.rate	= rate;
 
 	return sendMessage(UBX_MSG_CFG_MSG, (uint8_t *)&cfg_msg, sizeof(cfg_msg));
+#endif
 }
 
 bool
@@ -2699,6 +2894,17 @@ GPSDriverUBX::fnv1_32_str(uint8_t *str, uint32_t hval)
 int
 GPSDriverUBX::reset(GPSRestartType restart_type)
 {
+	// === DISABLED PERIPHERAL CONFIG WRITE (CFG-RST) ===
+	// Originally: send UBX-CFG-RST with resetMode = software reset and
+	// navBbrMask = HOT/WARM/COLD start to ask the receiver to drop / partially
+	// drop / fully drop its battery-backed-RAM (ephemeris, almanac, last fix,
+	// clock drift, etc.) and reboot the navigation engine. Useful when
+	// commanding a GPS reset from PX4 (e.g. to recover from a stuck fix).
+	// Disabled - do not command the receiver to reset; report success without
+	// touching the device.
+	(void)restart_type;
+	return 0;
+#if 0
 	memset(&_buf.payload_tx_cfg_rst, 0, sizeof(_buf.payload_tx_cfg_rst));
 	_buf.payload_tx_cfg_rst.resetMode = UBX_TX_CFG_RST_MODE_SOFTWARE;
 
@@ -2724,4 +2930,5 @@ GPSDriverUBX::reset(GPSRestartType restart_type)
 	}
 
 	return -2;
+#endif
 }
