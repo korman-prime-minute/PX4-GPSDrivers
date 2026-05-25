@@ -116,11 +116,12 @@ GPSDriverUBX::configure(unsigned &baudrate, const GPSConfig &config)
 				 UBX_TX_CFG_PRT_PROTO_UBX;
 
 	const bool auto_baudrate = baudrate == 0;
+	const uint32_t DEFAULT_BAUDRATE = 115200;
 
 	if (_interface == Interface::UART) {
 
 		/* try different baudrates */
-		const unsigned baudrates[] = {57600};
+		const unsigned baudrates[] = {DEFAULT_BAUDRATE};
 
 		unsigned baud_i;
 		unsigned desired_baudrate = auto_baudrate ? UBX_BAUDRATE_M8_AND_NEWER : baudrate;
@@ -191,7 +192,7 @@ GPSDriverUBX::configure(unsigned &baudrate, const GPSConfig &config)
 				// the link baud (host-side setBaudrate() below still runs).
 				// Now we only have to change the baudrate
 				// cfg_valset_msg_size = initCfgValset();
-				desired_baudrate = 57600;
+				desired_baudrate = DEFAULT_BAUDRATE;
 				// cfgValset<uint32_t>(UBX_CFG_KEY_CFG_UART1_BAUDRATE, desired_baudrate, cfg_valset_msg_size);
 				//
 				// if (!sendMessage(UBX_MSG_CFG_VALSET, (uint8_t *)&_buf, cfg_valset_msg_size)) {
