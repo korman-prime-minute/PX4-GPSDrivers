@@ -1175,7 +1175,7 @@ private:
 
 	uint64_t _last_timestamp_time{0};
 
-	Board _board{Board::unknown};
+	Board _board{Board::u_blox9};
 
 	OutputMode _output_mode{OutputMode::GPS};
 
