@@ -2152,24 +2152,18 @@ GPSDriverUBX::payloadRxDone()
 
 		now_prev = now;
 
-		PX4_INFO_RAW("%s,%llu,%u,%u,%u,%u,%u,%u,%u,%u,%u,%d,%u,%u,%u,%u\r\n",
+		PX4_INFO_RAW("%s,%llu,%u,%u,%u,%d,%u,%u,%u,%u\r\n",
 			     UBX_NAV_PVT_PREFIX,
 			     (unsigned long long)now,
 			     (unsigned)_buf.payload_rx_nav_pvt.iTOW,
-			     (unsigned)_buf.payload_rx_nav_pvt.year,
-			     (unsigned)_buf.payload_rx_nav_pvt.month,
-			     (unsigned)_buf.payload_rx_nav_pvt.day,
-			     (unsigned)_buf.payload_rx_nav_pvt.hour,
 			     (unsigned)_buf.payload_rx_nav_pvt.min,
 			     (unsigned)_buf.payload_rx_nav_pvt.sec,
-			     (unsigned)_buf.payload_rx_nav_pvt.valid,
-			     (unsigned)_buf.payload_rx_nav_pvt.tAcc,
 			     (int)_buf.payload_rx_nav_pvt.nano,
 			     (unsigned)_buf.payload_rx_nav_pvt.fixType,
 			     (unsigned)_buf.payload_rx_nav_pvt.flags,
 			     (unsigned)_buf.payload_rx_nav_pvt.flags2,
 			     (unsigned)_buf.payload_rx_nav_pvt.numSV);
-		PX4_INFO_RAW("%s,%llu,%d,%d,%d,%d,%u,%u,%d,%d,%d,%d,%d,%u,%u,%u,%u,%u,%d\r\n",
+		PX4_INFO_RAW("%s,%llu,%d,%d,%d,%d,%u,%u,%d,%d,%d,%d,%d,%u,%u,%u\r\n",
 			     UBX_NAV_PVT_PREFIX,
 			     (unsigned long long)now,
 			     (int)_buf.payload_rx_nav_pvt.lon,
@@ -2184,11 +2178,8 @@ GPSDriverUBX::payloadRxDone()
 			     (int)_buf.payload_rx_nav_pvt.gSpeed,
 			     (int)_buf.payload_rx_nav_pvt.headMot,
 			     (unsigned)_buf.payload_rx_nav_pvt.sAcc,
-			     (unsigned)_buf.payload_rx_nav_pvt.headAcc,
 			     (unsigned)_buf.payload_rx_nav_pvt.pDOP,
-			     (unsigned)_buf.payload_rx_nav_pvt.flags3,
-			     (unsigned)_buf.payload_rx_nav_pvt.reserved0,
-			     (int)_buf.payload_rx_nav_pvt.headVeh);
+			     (unsigned)_buf.payload_rx_nav_pvt.flags3);
 
 		//Check if position fix flag is good
 		if ((_buf.payload_rx_nav_pvt.flags & UBX_RX_NAV_PVT_FLAGS_GNSSFIXOK) == 1) {
