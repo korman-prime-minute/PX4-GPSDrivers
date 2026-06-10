@@ -2152,7 +2152,7 @@ GPSDriverUBX::payloadRxDone()
 
 		now_prev = now;
 
-		PX4_INFO_RAW("%s,%llu,%u,%u,%u,%d,%u,%u,%u,%u\r\n",
+		PRIME_LOG("%s,%llu,%u,%u,%u,%d,%u,%u,%u,%u\r\n",
 			     UBX_NAV_PVT_PREFIX,
 			     (unsigned long long)now,
 			     (unsigned)_buf.payload_rx_nav_pvt.iTOW,
@@ -2163,7 +2163,7 @@ GPSDriverUBX::payloadRxDone()
 			     (unsigned)_buf.payload_rx_nav_pvt.flags,
 			     (unsigned)_buf.payload_rx_nav_pvt.flags2,
 			     (unsigned)_buf.payload_rx_nav_pvt.numSV);
-		PX4_INFO_RAW("%s,%llu,%d,%d,%d,%d,%u,%u,%d,%d,%d,%d,%d,%u,%u,%u\r\n",
+		PRIME_LOG("%s,%llu,%d,%d,%d,%d,%u,%u,%d,%d,%d,%d,%d,%u,%u,%u\r\n",
 			     UBX_NAV_PVT_PREFIX,
 			     (unsigned long long)now,
 			     (int)_buf.payload_rx_nav_pvt.lon,
