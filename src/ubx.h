@@ -996,7 +996,8 @@ public:
 		     uint8_t dynamic_model = 7,
 		     float heading_offset = 0.f,
 		     int32_t uart2_baudrate = 57600,
-		     UBXMode mode = UBXMode::Normal);
+		     UBXMode mode = UBXMode::Normal,
+		     float pvt_warn_rate_hz = 9.5f);
 
 	virtual ~GPSDriverUBX();
 
@@ -1184,6 +1185,7 @@ private:
 	const UBXMode _mode;
 	const float _heading_offset;
 	const int32_t _uart2_baudrate;
+	const uint32_t _nav_pvt_warn_period_us; ///< warn on NAV-PVT gap exceeding this (derived from UBX_PVT_WRN_HZ)
 };
 
 

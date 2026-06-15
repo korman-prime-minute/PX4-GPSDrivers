@@ -77,7 +77,7 @@ static constexpr char UBX_RXM_RTCM_PREFIX[] = "RTM";
 
 GPSDriverUBX::GPSDriverUBX(Interface gpsInterface, GPSCallbackPtr callback, void *callback_user,
 			   sensor_gps_s *gps_position, satellite_info_s *satellite_info, uint8_t dynamic_model,
-			   float heading_offset, int32_t uart2_baudrate, UBXMode mode) :
+			   float heading_offset, int32_t uart2_baudrate, UBXMode mode, float pvt_warn_rate_hz) :
 	GPSBaseStationSupport(callback, callback_user),
 	_interface(gpsInterface),
 	_gps_position(gps_position),
@@ -85,7 +85,8 @@ GPSDriverUBX::GPSDriverUBX(Interface gpsInterface, GPSCallbackPtr callback, void
 	_dyn_model(dynamic_model),
 	_mode(mode),
 	_heading_offset(heading_offset),
-	_uart2_baudrate(uart2_baudrate)
+	_uart2_baudrate(uart2_baudrate),
+	_nav_pvt_warn_period_us(pvt_warn_rate_hz > 0.f ? (uint32_t)(1e6f / pvt_warn_rate_hz) : 0)
 {
 	/* Emit CSV headers for UBX messages (PVT, DOP) once at driver construction */
 	// PX4_INFO_RAW("PVT,now_us,iTOW,year,month,day,hour,min,sec,valid,tAcc,nano,fixType,flags,numSV,lon,lat,height,hMSL,hAcc,vAcc,velN,velE,velD,gSpeed,headMot,sAcc,headAcc,pDOP,headVeh\r\n");
@@ -2143,10 +2144,9 @@ GPSDriverUBX::payloadRxDone()
 		 * Note: magDec/magAcc fields from F9 spec are not present in local
 		 *       ubx_payload_rx_nav_pvt_t and are therefore not logged. */
 		{
-		#define NAV_PVT_MIN_PERIOD_US (44000)
 		hrt_abstime now = hrt_absolute_time();
 		static hrt_abstime now_prev = 0;
-		if (now_prev != 0 && hrt_elapsed_time(&now_prev) > NAV_PVT_MIN_PERIOD_US) {
+		if (now_prev != 0 && _nav_pvt_warn_period_us != 0 && hrt_elapsed_time(&now_prev) > _nav_pvt_warn_period_us) {
 			PX4_WARN("UBX NAV-PVT time jump detected - %ums (%dHz)", (unsigned int)hrt_elapsed_time(&now_prev), (uint8_t)(1000000 / hrt_elapsed_time(&now_prev)));
 		}
 
