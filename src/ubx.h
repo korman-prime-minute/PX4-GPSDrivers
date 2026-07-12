@@ -1176,6 +1176,17 @@ private:
 
 	uint64_t _last_timestamp_time{0};
 
+	// --- UBX-RXM-RTCM diagnostics (does the F9P actually USE the corrections?) ----
+	// RXM-RTCM must be enabled on the receiver's active port (u-center) for these to
+	// populate; if it never arrives that is itself the finding (warned from NAV-PVT).
+	hrt_abstime _rxm_rtcm_last_seen{0};		///< time of last UBX-RXM-RTCM message (0 = never)
+	hrt_abstime _rxm_rtcm_last_summary{0};		///< time of last RXM-RTCM aggregate print
+	hrt_abstime _rxm_rtcm_last_absent_warn{0};	///< time of last "RXM-RTCM not seen" warning
+	uint32_t _rxm_rtcm_count{0};			///< RXM-RTCM messages since last summary
+	uint32_t _rxm_rtcm_used{0};			///< of those, msgUsed == 2 (used successfully)
+	uint32_t _rxm_rtcm_not_used{0};			///< of those, msgUsed == 1 (received but not used)
+	uint32_t _rxm_rtcm_crc_failed{0};		///< of those, crcFailed == 1
+
 	Board _board{Board::unknown};
 
 	OutputMode _output_mode{OutputMode::GPS};

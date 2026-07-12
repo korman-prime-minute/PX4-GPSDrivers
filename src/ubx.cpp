@@ -58,6 +58,12 @@
 // CPU time
 #include <drivers/drv_hrt.h>
 
+#include <prime_console_log/prime_console_log.h>
+
+/* RTCM/RTK diagnostic logging throttle intervals [microseconds] */
+static constexpr hrt_abstime UBX_RTCM_LOG_SUMMARY_INTERVAL = 5 * 1000 * 1000;
+static constexpr hrt_abstime UBX_RTCM_LOG_ABSENT_INTERVAL  = 10 * 1000 * 1000;
+
 /* CSV prefixes for logging */
 static constexpr char UBX_NAV_DOP_PREFIX[] = "DOP";
 static constexpr char UBX_NAV_PVT_PREFIX[] = "PVT";
@@ -2152,34 +2158,34 @@ GPSDriverUBX::payloadRxDone()
 
 		now_prev = now;
 
-		PRIME_LOG("%s,%llu,%u,%u,%u,%d,%u,%u,%u,%u\r\n",
-			     UBX_NAV_PVT_PREFIX,
-			     (unsigned long long)now,
-			     (unsigned)_buf.payload_rx_nav_pvt.iTOW,
-			     (unsigned)_buf.payload_rx_nav_pvt.min,
-			     (unsigned)_buf.payload_rx_nav_pvt.sec,
-			     (int)_buf.payload_rx_nav_pvt.nano,
-			     (unsigned)_buf.payload_rx_nav_pvt.fixType,
-			     (unsigned)_buf.payload_rx_nav_pvt.flags,
-			     (unsigned)_buf.payload_rx_nav_pvt.flags2,
-			     (unsigned)_buf.payload_rx_nav_pvt.numSV);
-		PRIME_LOG("%s,%llu,%d,%d,%d,%d,%u,%u,%d,%d,%d,%d,%d,%u,%u,%u\r\n",
-			     UBX_NAV_PVT_PREFIX,
-			     (unsigned long long)now,
-			     (int)_buf.payload_rx_nav_pvt.lon,
-			     (int)_buf.payload_rx_nav_pvt.lat,
-			     (int)_buf.payload_rx_nav_pvt.height,
-			     (int)_buf.payload_rx_nav_pvt.hMSL,
-			     (unsigned)_buf.payload_rx_nav_pvt.hAcc,
-			     (unsigned)_buf.payload_rx_nav_pvt.vAcc,
-			     (int)_buf.payload_rx_nav_pvt.velN,
-			     (int)_buf.payload_rx_nav_pvt.velE,
-			     (int)_buf.payload_rx_nav_pvt.velD,
-			     (int)_buf.payload_rx_nav_pvt.gSpeed,
-			     (int)_buf.payload_rx_nav_pvt.headMot,
-			     (unsigned)_buf.payload_rx_nav_pvt.sAcc,
-			     (unsigned)_buf.payload_rx_nav_pvt.pDOP,
-			     (unsigned)_buf.payload_rx_nav_pvt.flags3);
+		// PRIME_LOG("%s,%llu,%u,%u,%u,%d,%u,%u,%u,%u\r\n",
+		// 	     UBX_NAV_PVT_PREFIX,
+		// 	     (unsigned long long)now,
+		// 	     (unsigned)_buf.payload_rx_nav_pvt.iTOW,
+		// 	     (unsigned)_buf.payload_rx_nav_pvt.min,
+		// 	     (unsigned)_buf.payload_rx_nav_pvt.sec,
+		// 	     (int)_buf.payload_rx_nav_pvt.nano,
+		// 	     (unsigned)_buf.payload_rx_nav_pvt.fixType,
+		// 	     (unsigned)_buf.payload_rx_nav_pvt.flags,
+		// 	     (unsigned)_buf.payload_rx_nav_pvt.flags2,
+		// 	     (unsigned)_buf.payload_rx_nav_pvt.numSV);
+		// PRIME_LOG("%s,%llu,%d,%d,%d,%d,%u,%u,%d,%d,%d,%d,%d,%u,%u,%u\r\n",
+		// 	     UBX_NAV_PVT_PREFIX,
+		// 	     (unsigned long long)now,
+		// 	     (int)_buf.payload_rx_nav_pvt.lon,
+		// 	     (int)_buf.payload_rx_nav_pvt.lat,
+		// 	     (int)_buf.payload_rx_nav_pvt.height,
+		// 	     (int)_buf.payload_rx_nav_pvt.hMSL,
+		// 	     (unsigned)_buf.payload_rx_nav_pvt.hAcc,
+		// 	     (unsigned)_buf.payload_rx_nav_pvt.vAcc,
+		// 	     (int)_buf.payload_rx_nav_pvt.velN,
+		// 	     (int)_buf.payload_rx_nav_pvt.velE,
+		// 	     (int)_buf.payload_rx_nav_pvt.velD,
+		// 	     (int)_buf.payload_rx_nav_pvt.gSpeed,
+		// 	     (int)_buf.payload_rx_nav_pvt.headMot,
+		// 	     (unsigned)_buf.payload_rx_nav_pvt.sAcc,
+		// 	     (unsigned)_buf.payload_rx_nav_pvt.pDOP,
+		// 	     (unsigned)_buf.payload_rx_nav_pvt.flags3);
 
 		//Check if position fix flag is good
 		if ((_buf.payload_rx_nav_pvt.flags & UBX_RX_NAV_PVT_FLAGS_GNSSFIXOK) == 1) {
@@ -2208,6 +2214,35 @@ GPSDriverUBX::payloadRxDone()
 		_gps_position->satellites_used	= _buf.payload_rx_nav_pvt.numSV;
 		_gps_position->last_correction_age = (_buf.payload_rx_nav_pvt.flags3 & UBX_RX_NAV_PVT_FLAGS_LAST_CORR_AGE_MASK) >> 1;
 
+		// ---- RTK-state diagnostics (throttled) --------------------------------------
+		// carrSoln (0=none, 1=float, 2=fixed), diffSoln, numSV and the receiver's own
+		// correction-age code tell us at a glance whether corrections reach the engine.
+		{
+			const uint8_t carr_soln_dbg = (_buf.payload_rx_nav_pvt.flags & UBX_RX_NAV_PVT_FLAGS_CARRSOLN) >> 6;
+			const bool    diff_soln_dbg = (_buf.payload_rx_nav_pvt.flags & UBX_RX_NAV_PVT_FLAGS_DIFFSOLN) != 0;
+			const hrt_abstime now_pvt   = hrt_absolute_time();
+			static hrt_abstime rtk_state_last_summary = 0;
+
+			if (now_pvt - rtk_state_last_summary > UBX_RTCM_LOG_SUMMARY_INTERVAL) {
+				rtk_state_last_summary = now_pvt;
+				const char *soln = (carr_soln_dbg == 2) ? "RTK-FIXED" :
+						   (carr_soln_dbg == 1) ? "RTK-FLOAT" : "none";
+				PRIME_LOG("[INFO] RTK state: carrSoln %u (%s), diffSoln %u, fixType %u, numSV %u, corrAgeCode %u\r\n",
+					  carr_soln_dbg, soln, (unsigned)diff_soln_dbg,
+					  (unsigned)_buf.payload_rx_nav_pvt.fixType,
+					  (unsigned)_buf.payload_rx_nav_pvt.numSV,
+					  (unsigned)_gps_position->last_correction_age);
+			}
+
+			// Watchdog: if corrections are clearly flowing (float/fixed or diffSoln)
+			// yet UBX-RXM-RTCM never arrived, it is not enabled on the F9P active port.
+			if (_rxm_rtcm_last_seen == 0 && (carr_soln_dbg != 0 || diff_soln_dbg)
+			    && now_pvt - _rxm_rtcm_last_absent_warn > UBX_RTCM_LOG_ABSENT_INTERVAL) {
+				_rxm_rtcm_last_absent_warn = now_pvt;
+				PRIME_LOG("[WARN] RTK: corrections active but UBX-RXM-RTCM never seen - enable it on F9P port\r\n");
+			}
+		}
+
 		if (_gps_position->fix_type < 99) { // Continue receiving non HPPOS even in RTK mode.
 			// When RTK is active and solid (fix=6), these values will be filled by HPPOSLLH:
 			_gps_position->latitude_deg		= _buf.payload_rx_nav_pvt.lat * 1e-7;
@@ -2232,8 +2267,6 @@ GPSDriverUBX::payloadRxDone()
 
 		_gps_position->cog_rad		= static_cast<float>(_buf.payload_rx_nav_pvt.headMot) * M_DEG_TO_RAD_F * 1e-5f;
 		_gps_position->c_variance_rad	= static_cast<float>(_buf.payload_rx_nav_pvt.headAcc) * M_DEG_TO_RAD_F * 1e-5f;
-
-		_gps_position->last_correction_age = static_cast<float>(_buf.payload_rx_nav_pvt.flags3 & UBX_RX_NAV_PVT_FLAGS3_LAST_CORR_AGE);
 
 		//Check if time and date fix flags are good
 		if ((_buf.payload_rx_nav_pvt.valid & UBX_RX_NAV_PVT_VALID_VALIDDATE)
@@ -2618,26 +2651,54 @@ GPSDriverUBX::payloadRxDone()
 		ret = 1;
 		break;
 
-	case UBX_MSG_RXM_RTCM:
+	case UBX_MSG_RXM_RTCM: {
 		UBX_TRACE_RXMSG("Rx RXM-RTCM");
 
-		_gps_position->rtcm_crc_failed = (_buf.payload_rx_rxm_rtcm.flags & UBX_RX_RXM_RTCM_CRCFAILED_MASK) != 0;
+		const bool    crc_failed = (_buf.payload_rx_rxm_rtcm.flags & UBX_RX_RXM_RTCM_CRCFAILED_MASK) != 0;
+		const uint8_t msg_used   = (_buf.payload_rx_rxm_rtcm.flags & UBX_RX_RXM_RTCM_MSGUSED_MASK) >>
+					   UBX_RX_RXM_RTCM_MSGUSED_SHIFT;
 
-		_gps_position->rtcm_msg_used  = (_buf.payload_rx_rxm_rtcm.flags & UBX_RX_RXM_RTCM_MSGUSED_MASK) >>
-						UBX_RX_RXM_RTCM_MSGUSED_SHIFT;
+		_gps_position->rtcm_crc_failed = crc_failed;
+		_gps_position->rtcm_msg_used   = msg_used;
 
-		// /* CSV log: RXM-RTCM brief info */
-		// PX4_INFO_RAW("%s,%llu,%u,%u,%u,%u,%u\r\n",
-		// 	UBX_RXM_RTCM_PREFIX,
-		// 	(unsigned long long)hrt_absolute_time(),
-		// 	(unsigned)_buf.payload_rx_rxm_rtcm.version,
-		// 	(unsigned)_buf.payload_rx_rxm_rtcm.flags,
-		// 	(unsigned)_buf.payload_rx_rxm_rtcm.subType,
-		// 	(unsigned)_buf.payload_rx_rxm_rtcm.refStationID,
-		// 	(unsigned)_buf.payload_rx_rxm_rtcm.msgType);
+		// This is the single most valuable RTK diagnostic: per RTCM type, did the
+		// F9P actually USE the correction (msgUsed==2) or just receive it? A stream
+		// of msgUsed==1 (not used) or crcFailed==1 means corrections arrive but do
+		// not feed the RTK engine - exactly the "receiving but never FIXED" symptom.
+		const hrt_abstime now = hrt_absolute_time();
+		_rxm_rtcm_last_seen = now;
+		_rxm_rtcm_count++;
+
+		if (crc_failed) {
+			_rxm_rtcm_crc_failed++;
+
+		} else if (msg_used == 2) {
+			_rxm_rtcm_used++;
+
+		} else {
+			// msg_used == 1 (not used) or 0 (unknown)
+			_rxm_rtcm_not_used++;
+		}
+
+		// Periodic aggregate: used/not-used/crc-fail ratio at a glance. The ratio is
+		// the smoking gun (corrections received but not applied), so one throttled
+		// line carries it without a print per message at the RTCM rate.
+		if (now - _rxm_rtcm_last_summary > UBX_RTCM_LOG_SUMMARY_INTERVAL) {
+			PRIME_LOG("[INFO] %s: %u msgs, %u used, %u not-used, %u crc-fail (last type %u)\r\n",
+				  UBX_RXM_RTCM_PREFIX, (unsigned)_rxm_rtcm_count, (unsigned)_rxm_rtcm_used,
+				  (unsigned)_rxm_rtcm_not_used, (unsigned)_rxm_rtcm_crc_failed,
+				  (unsigned)_buf.payload_rx_rxm_rtcm.msgType);
+
+			_rxm_rtcm_last_summary = now;
+			_rxm_rtcm_count = 0;
+			_rxm_rtcm_used = 0;
+			_rxm_rtcm_not_used = 0;
+			_rxm_rtcm_crc_failed = 0;
+		}
 
 		ret = 1;
 		break;
+	}
 
 	case UBX_MSG_ACK_ACK:
 		UBX_TRACE_RXMSG("Rx ACK-ACK");
