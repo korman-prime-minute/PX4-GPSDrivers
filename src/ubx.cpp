@@ -51,9 +51,16 @@
  */
 
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <errno.h>
+#include <sys/stat.h>
 
 #include "rtcm.h"
 #include "ubx.h"
+#include "crc.h"
 
 // CPU time
 #include <drivers/drv_hrt.h>
@@ -80,10 +87,17 @@ static constexpr char UBX_RXM_RTCM_PREFIX[] = "RTM";
 /**** Warning macros, disable to save memory */
 #define UBX_WARN(...)         {GPS_WARN(__VA_ARGS__);}
 #define UBX_DEBUG(...)        {GPS_WARN(__VA_ARGS__);}
+#define UBX_ERR(...)          {GPS_ERR(__VA_ARGS__);}
+#define UBX_INFO(...)         {GPS_INFO(__VA_ARGS__);}
+
+/* Non-blocking [UBXCFG]-tagged process log for the SD config-file / RAM-dump feature.
+ * Mirrored to console + UART5 for GUI-side sharing; safe in the RX path. */
+#define UBXCFG_LOG(fmt, ...)  PRIME_LOG("[UBXCFG] " fmt "\r\n", ##__VA_ARGS__)
 
 GPSDriverUBX::GPSDriverUBX(Interface gpsInterface, GPSCallbackPtr callback, void *callback_user,
 			   sensor_gps_s *gps_position, satellite_info_s *satellite_info, uint8_t dynamic_model,
-			   float heading_offset, int32_t uart2_baudrate, UBXMode mode, float pvt_warn_rate_hz) :
+			   float heading_offset, int32_t uart2_baudrate, UBXMode mode, float pvt_warn_rate_hz,
+			   bool cfg_file_enabled) :
 	GPSBaseStationSupport(callback, callback_user),
 	_interface(gpsInterface),
 	_gps_position(gps_position),
@@ -92,7 +106,8 @@ GPSDriverUBX::GPSDriverUBX(Interface gpsInterface, GPSCallbackPtr callback, void
 	_mode(mode),
 	_heading_offset(heading_offset),
 	_uart2_baudrate(uart2_baudrate),
-	_nav_pvt_warn_period_us(pvt_warn_rate_hz > 0.f ? (uint32_t)(1e6f / pvt_warn_rate_hz) : 0)
+	_nav_pvt_warn_period_us(pvt_warn_rate_hz > 0.f ? (uint32_t)(1e6f / pvt_warn_rate_hz) : 0),
+	_cfg_file_enabled(cfg_file_enabled)
 {
 	/* Emit CSV headers for UBX messages (PVT, DOP) once at driver construction */
 	// PX4_INFO_RAW("PVT,now_us,iTOW,year,month,day,hour,min,sec,valid,tAcc,nano,fixType,flags,numSV,lon,lat,height,hMSL,hAcc,vAcc,velN,velE,velD,gSpeed,headMot,sAcc,headAcc,pDOP,headVeh\r\n");
@@ -369,6 +384,14 @@ GPSDriverUBX::configure(unsigned &baudrate, const GPSConfig &config)
 	// 		baudrate = UBX_BAUDRATE_M8_AND_NEWER;
 	// 	}
 	// }
+
+	/* Provision the receiver from a config file on the SD card, if enabled (GPS_UBX_CFGFILE).
+	 * Runs once here, after the link baud is locked and the device is responsive, but before
+	 * output-mode/RTCM setup. Failures never abort bring-up (see loadConfigFromFile). UART only:
+	 * the config file targets the F9P's own port config which is set over the host UART link. */
+	if (_cfg_file_enabled && _interface == Interface::UART) {
+		loadConfigFromFile(UBX_CFGFILE_PATH);
+	}
 
 	if (_output_mode == OutputMode::GPSAndRTCM || _output_mode == OutputMode::RTCM || _mode == UBXMode::MovingBaseUART1) {
 		if (!_rtcm_parsing) {
@@ -1045,6 +1068,56 @@ int GPSDriverUBX::initCfgValset()
 	return sizeof(_buf.payload_tx_cfg_valset) - sizeof(_buf.payload_tx_cfg_valset.cfgData);
 }
 
+uint8_t GPSDriverUBX::ubxCfgKeySize(uint32_t key)
+{
+	// storage-size id in bits 28-30 of the key ID (u-blox Gen9+ config key format)
+	switch (UBX_CFG_KEY_SIZE_ID(key)) {
+	case 0x01: return 1;   // L  (1 bit, stored/transferred as 1 byte)
+	case 0x02: return 1;   // U1 / I1 / E1 / X1
+	case 0x03: return 2;   // U2 / I2 / E2 / X2
+	case 0x04: return 4;   // U4 / I4 / E4 / X4 / R4
+	case 0x05: return 8;   // U8 / I8 / X8 / R8
+	default:   return 0;   // unknown -> caller must treat as fatal for this pair
+	}
+}
+
+template<typename Handler>
+int GPSDriverUBX::walkCfgTlv(const uint8_t *body, uint16_t len, Handler handler)
+{
+	// body points at the first key byte (the 4-byte version/layer/position header is
+	// already skipped). Layout: repeated [4-byte LE keyID][value bytes]. Identical
+	// encoding for a CFG-VALGET response and a CFG-VALSET request body.
+	uint16_t off = 0;
+	int pairs = 0;
+
+	while (off < len) {
+		if (off + 4 > len) {
+			UBX_WARN("VALGET/TLV: truncated key at offset %u", off);
+			return -1;
+		}
+
+		uint32_t key;
+		memcpy(&key, body + off, sizeof(key));   // little-endian on target
+		const uint8_t vlen = ubxCfgKeySize(key);
+
+		if (vlen == 0) {
+			UBX_WARN("VALGET/TLV: unknown size for key 0x%08x at offset %u", (unsigned)key, off);
+			return -1;
+		}
+
+		if (off + 4 + vlen > len) {
+			UBX_WARN("VALGET/TLV: truncated value for key 0x%08x at offset %u", (unsigned)key, off);
+			return -1;
+		}
+
+		handler(key, body + off + 4, vlen);
+		off += 4 + vlen;
+		++pairs;
+	}
+
+	return pairs;
+}
+
 template<typename T>
 bool GPSDriverUBX::cfgValset(uint32_t key_id, T value, int &msg_size)
 {
@@ -1084,6 +1157,397 @@ bool GPSDriverUBX::cfgValsetPort(uint32_t key_id, uint8_t value, int &msg_size)
 	}
 
 	return true;
+}
+
+/* Decode two ASCII hex nibbles at s into a byte. Returns -1 if either char is not hex. */
+static int ubx_hex_byte(const char *s)
+{
+	auto nib = [](char c) -> int {
+		if (c >= '0' && c <= '9') { return c - '0'; }
+		if (c >= 'a' && c <= 'f') { return c - 'a' + 10; }
+		if (c >= 'A' && c <= 'F') { return c - 'A' + 10; }
+		return -1;
+	};
+	const int hi = nib(s[0]);
+	const int lo = nib(s[1]);
+	if (hi < 0 || lo < 0) { return -1; }
+	return (hi << 4) | lo;
+}
+
+int GPSDriverUBX::loadConfigFromFile(const char *path)
+{
+	const int fd = ::open(path, O_RDONLY);
+
+	if (fd < 0) {
+		// No config file present is the normal case for an externally-provisioned
+		// receiver; warn and leave the device untouched (never fails bring-up).
+		UBX_WARN("UBX cfg: %s not found/unreadable (errno %d), skipping provisioning", path, errno);
+		return -1;
+	}
+
+	// Own buffers — sendMessage() streams the caller buffer directly, so the tiny _buf
+	// union is not involved and frames may be larger than sizeof(_buf). The two large
+	// buffers are heap-allocated to keep the GPS thread stack frame small.
+	// All heap-allocated: u-center packs one CFG-VALGET per line with many keys, so a line's
+	// ASCII hex and its decoded payload are large (KB-scale) and must not sit on the GPS stack.
+	char    *line   = (char *)malloc(UBX_CFGFILE_LINE_MAX);             // one file line (ASCII)
+	uint8_t *hexbuf = (uint8_t *)malloc(UBX_CFGFILE_HEX_MAX);           // decoded bytes of one line
+	uint8_t *valset = (uint8_t *)malloc(4 + UBX_VALSET_MAX_KEYS * 12);  // header + up to 64 [key+value]
+
+	if (!line || !hexbuf || !valset) {
+		UBX_ERR("UBX cfg: out of memory");
+		free(line);
+		free(hexbuf);
+		free(valset);
+		::close(fd);
+		return -1;
+	}
+
+	const size_t valset_cap = 4 + UBX_VALSET_MAX_KEYS * 12;
+	unsigned lineno = 0;
+	unsigned frames = 0;
+	unsigned nak = 0;
+	unsigned skipped = 0;
+
+	// Manual line reader over the fd (no stdio: bounded memory, no NuttX buffering surprises).
+	char   rd[256];
+	int    rd_len = 0;
+	int    rd_pos = 0;
+	int    li = 0;
+	bool   line_overflow = false;
+	bool   eof = false;
+
+	while (!eof) {
+		if (rd_pos >= rd_len) {
+			rd_len = ::read(fd, rd, sizeof(rd));
+			rd_pos = 0;
+
+			if (rd_len <= 0) {
+				eof = true;
+
+				if (li == 0) { break; }   // no partial line pending
+			}
+		}
+
+		char c = 0;
+
+		if (!eof) {
+			c = rd[rd_pos++];
+		}
+
+		if (!eof && c != '\n') {
+			if (li < (int)UBX_CFGFILE_LINE_MAX - 1) {
+				line[li++] = c;
+
+			} else {
+				line_overflow = true;   // keep consuming until newline, then report
+			}
+
+			continue;
+		}
+
+		// End of a line (or EOF with a pending partial line).
+		line[li] = '\0';
+		++lineno;
+		const int this_li = li;
+		li = 0;
+
+		if (line_overflow) {
+			UBX_WARN("UBX cfg line %u: too long (>%u), skipping", lineno, (unsigned)UBX_CFGFILE_LINE_MAX);
+			UBXCFG_LOG("provision: line %u too long (>%u chars), skipping", lineno, (unsigned)UBX_CFGFILE_LINE_MAX);
+			line_overflow = false;
+			continue;
+		}
+
+		// Trim leading whitespace.
+		char *p = line;
+
+		while (*p == ' ' || *p == '\t' || *p == '\r') { ++p; }
+
+		// Skip blank and comment lines.
+		if (*p == '\0' || *p == '#' || *p == ';' || *p == '/') {
+			continue;
+		}
+
+		(void)this_li;
+
+		// Skip the "<NAME> - " prefix and reach the hex field. The message NAME itself
+		// contains '-' (e.g. "CFG-VALGET", "CFG-RATE-MEAS"), so we must split on the
+		// " - " separator (space-dash-space) between name and hex, NOT the first '-'.
+		char *sep = strstr(p, " - ");
+
+		if (sep) {
+			p = sep + 3;   // step past " - "
+
+		} else {
+			// No " - " separator: fall back to skipping a leading non-hex name token
+			// (advance past the first whitespace-delimited word if it isn't hex).
+			char *q = p;
+
+			while (*q && *q != ' ' && *q != '\t') { ++q; }
+
+			if (*q) { p = q + 1; }
+		}
+
+		// Tokenize hex bytes.
+		int n = 0;
+		bool bad = false;
+
+		while (*p && n < (int)UBX_CFGFILE_HEX_MAX) {
+			while (*p == ' ' || *p == '\t' || *p == '\r') { ++p; }
+
+			if (*p == '\0') { break; }
+
+			// need two hex chars
+			if (p[1] == '\0') { bad = true; break; }
+
+			const int b = ubx_hex_byte(p);
+
+			if (b < 0) { bad = true; break; }
+
+			hexbuf[n++] = (uint8_t)b;
+			p += 2;
+		}
+
+		if (bad) {
+			UBX_WARN("UBX cfg line %u: bad hex, skipping line", lineno);
+			++skipped;
+			continue;
+		}
+
+		// u-center writes the raw UBX frame bytes (minus sync + checksum):
+		//   class(1) id(1) length(2, LE) | version(1) layer(1) position(2) | [key(4)+value]...
+		// So the CFG-VALGET body header is at offset 4, and the key/value TLVs at offset 8.
+		static const int kHdrBytes = 2 /*class+id*/ + 2 /*length*/ + 4 /*ver+layer+pos*/;
+
+		if (n < kHdrBytes) {
+			UBX_WARN("UBX cfg line %u: malformed (%d bytes), skipping", lineno, n);
+			++skipped;
+			continue;
+		}
+
+		const uint8_t cls = hexbuf[0];
+		const uint8_t id  = hexbuf[1];
+
+		// Keep only CFG-VALGET lines (0x06 0x8B) — u-center exports config as VALGET dumps.
+		if (!(cls == UBX_CLASS_CFG && id == UBX_ID_CFG_VALGET)) {
+			UBX_DEBUG("UBX cfg line %u: skipping non-VALGET (%02X %02X)", lineno, cls, id);
+			++skipped;
+			continue;
+		}
+
+		// Walk the key/value TLVs (after class+id+length+4-byte VALGET header) and re-emit
+		// them as CFG-VALSET frames (RAM layer), splitting at 64 keys per frame.
+		const uint8_t *tlv = &hexbuf[kHdrBytes];
+		const uint16_t tlv_len = (uint16_t)(n - kHdrBytes);
+
+		int  msg_size = 0;
+		int  keys_in_frame = 0;
+
+		auto flush_frame = [&]() -> bool {
+			if (keys_in_frame == 0) { return true; }
+
+			const bool ok = sendMessage(UBX_MSG_CFG_VALSET, valset, (uint16_t)msg_size);
+
+			if (!ok) {
+				UBX_ERR("UBX cfg line %u: UART write failed", lineno);
+				return false;
+			}
+
+			// Longer ACK wait than the default RAM timeout: these VALSET frames also write the
+			// F9P Flash layer (erase/program), which the receiver acknowledges more slowly.
+			if (waitForAck(UBX_MSG_CFG_VALSET, UBX_CFGFILE_ACK_TIMEOUT, true) < 0) {
+				UBX_WARN("UBX cfg line %u: device NAK/timeout for VALSET", lineno);
+				++nak;
+
+			} else {
+				++frames;
+			}
+
+			msg_size = 0;
+			keys_in_frame = 0;
+			return true;
+		};
+
+		auto start_frame = [&]() {
+			// 4-byte VALSET header: version=0, layers, reserved[2]=0.
+			// Apply to RAM (takes effect immediately for this session) AND Flash (persists
+			// in the F9P's own NVM across power cycles, like u-center's "save to flash").
+			valset[0] = 0;
+			valset[1] = UBX_CFG_LAYER_RAM | UBX_CFG_LAYER_FLASH;
+			valset[2] = 0;
+			valset[3] = 0;
+			msg_size = 4;
+			keys_in_frame = 0;
+		};
+
+		start_frame();
+
+		bool io_ok = true;
+
+		const int pairs = walkCfgTlv(tlv, tlv_len,
+					     [&](uint32_t key, const uint8_t *val, uint8_t vlen) {
+			if (!io_ok) { return; }
+
+			// Would this pair overflow the frame buffer or the 64-key limit? flush first.
+			if (keys_in_frame >= UBX_VALSET_MAX_KEYS ||
+			    (size_t)msg_size + 4 + vlen > valset_cap) {
+				if (!flush_frame()) { io_ok = false; return; }
+				start_frame();
+			}
+
+			memcpy(&valset[msg_size], &key, 4);
+			msg_size += 4;
+			memcpy(&valset[msg_size], val, vlen);
+			msg_size += vlen;
+			++keys_in_frame;
+		});
+
+		if (!io_ok) {
+			// hard UART error — stop trying, report what we got
+			break;
+		}
+
+		if (pairs < 0) {
+			UBX_WARN("UBX cfg line %u: truncated VALGET body, skipping remainder", lineno);
+			++skipped;
+			continue;
+		}
+
+		if (!flush_frame()) {
+			break;
+		}
+	}
+
+	::close(fd);
+	free(line);
+	free(hexbuf);
+	free(valset);
+
+	if (frames == 0 && nak == 0 && skipped == 0) {
+		UBX_WARN("UBX cfg: no CFG-VALGET lines found in %s", path);
+	}
+
+	UBX_INFO("UBX cfg: %s frames=%u nak=%u skipped=%u", path, frames, nak, skipped);
+	return (int)frames;
+}
+
+// Config groups present on the ZED-F9P (group byte = bits 16-23 of a key ID), derived from the
+// UBX_CFG_KEY_* constants. A wildcard CFG-VALGET over each group returns that group's RAM values.
+static const uint8_t kUbxCfgGroups[] = {
+	0x03, 0x11, 0x14, 0x21, 0x22, 0x31, 0x32, 0x41, 0x51, 0x52, 0x53, 0x64,
+	0x65, 0x71, 0x72, 0x73, 0x74, 0x75, 0x76, 0x77, 0x78, 0x79, 0x7A, 0x91,
+};
+
+int GPSDriverUBX::pollAllConfig(int fd, uint32_t &crc)
+{
+	// Poll every known config group with a wildcard CFG-VALGET on the RAM layer, paginating
+	// until a page returns fewer than 64 pairs. The VALGET response handler (payloadRxDone)
+	// walks each page's TLV body, filters non-zero values, and appends KEY= lines to fd.
+	// Uses the same UART as NAV output, so this must run only when gated (RBF inserted).
+	static const int kMaxPagesPerGroup = 32;
+
+	_valget_dump_fd = fd;
+	_valget_dump_crc = 0;
+	_valget_dump_count = 0;
+
+	for (unsigned g = 0; g < sizeof(kUbxCfgGroups) / sizeof(kUbxCfgGroups[0]); ++g) {
+		const uint8_t group = kUbxCfgGroups[g];
+
+		for (int page = 0; page < kMaxPagesPerGroup; ++page) {
+			ubx_payload_tx_cfg_valget_t req{};
+			req.version  = 0;
+			req.layer    = UBX_CFG_VALGET_LAYER_RAM;
+			req.position = (uint16_t)(page * 64);
+			// wildcard: all items in this group (item bits 0xFFFF, size nibble 0)
+			req.keys     = ((uint32_t)group << 16) | 0x0000FFFFu;
+
+			const uint32_t count_before = _valget_dump_count;
+
+			_valget_len = 0;
+			_valget_capturing = true;
+
+			const bool ok = sendMessage(UBX_MSG_CFG_VALGET, (const uint8_t *)&req, sizeof(req));
+
+			if (!ok) {
+				_valget_capturing = false;
+				UBX_ERR("VALGET group %02X: UART write failed", group);
+				_valget_dump_fd = -1;
+				crc = _valget_dump_crc;
+				return -1;
+			}
+
+			// The response (CFG-VALGET, 0x06 0x8B) is decoded in payloadRxDone which clears
+			// _valget_capturing; a NAK/timeout means the group/page has no more data.
+			const bool acked = (waitForAck(UBX_MSG_CFG_VALGET, UBX_CONFIG_TIMEOUT, false) == 0);
+			_valget_capturing = false;
+
+			const uint32_t got = _valget_dump_count - count_before;
+
+			if (!acked && got == 0) {
+				break;   // empty group or done
+			}
+
+			if (got < 64) {
+				break;   // last page of this group
+			}
+
+			if (page == kMaxPagesPerGroup - 1) {
+				UBX_WARN("VALGET group %02X: pagination cap hit", group);
+			}
+		}
+	}
+
+	crc = _valget_dump_crc;
+	const int total = (int)_valget_dump_count;
+	_valget_dump_fd = -1;
+	return total;
+}
+
+int GPSDriverUBX::dumpConfigToFile(const char *tmp_path, const char *final_path)
+{
+	// Ensure the target directory exists (ignore EEXIST).
+	if (::mkdir(UBX_CFG_DIR, 0777) < 0 && errno != EEXIST) {
+		UBX_ERR("UBX dump: mkdir %s failed (errno %d)", UBX_CFG_DIR, errno);
+		return -1;
+	}
+
+	const int fd = ::open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+
+	if (fd < 0) {
+		UBX_ERR("UBX dump: open %s failed (errno %d)", tmp_path, errno);
+		return -1;
+	}
+
+	char hdr[128];
+	int hn = snprintf(hdr, sizeof(hdr),
+			  "# UBLOX F9P RAM CONFIG DUMP\n# time_us=%llu layer=RAM\n",
+			  (unsigned long long)gps_absolute_time());
+	::write(fd, hdr, hn);
+
+	uint32_t crc = 0;
+	const int count = pollAllConfig(fd, crc);
+
+	if (count < 0) {
+		::close(fd);
+		::unlink(tmp_path);
+		return -1;
+	}
+
+	char trailer[64];
+	int tn = snprintf(trailer, sizeof(trailer), "# COUNT=%d\n# CRC32=0x%08x\n", count, (unsigned)crc);
+	::write(fd, trailer, tn);
+
+	::fsync(fd);
+	::close(fd);
+
+	if (::rename(tmp_path, final_path) < 0) {
+		UBX_ERR("UBX dump: rename %s -> %s failed (errno %d)", tmp_path, final_path, errno);
+		::unlink(tmp_path);
+		return -1;
+	}
+
+	return count;
 }
 
 int GPSDriverUBX::restartSurveyInPreV27()
@@ -1458,6 +1922,10 @@ GPSDriverUBX::parseChar(const uint8_t b)
 			ret = payloadRxAddMonVer(b);	// add a MON-VER payload byte
 			break;
 
+		case UBX_MSG_CFG_VALGET:
+			ret = payloadRxAddCfgValget(b);	// add a CFG-VALGET response byte (RAM dump)
+			break;
+
 		default:
 			ret = payloadRxAdd(b);		// add a payload byte
 			break;
@@ -1727,6 +2195,19 @@ GPSDriverUBX::payloadRxInit()
 
 		break;
 
+	case UBX_MSG_CFG_VALGET:
+		// RAM read-back response. Only accept while a pollAllConfig() request is in flight
+		// and it fits our dedicated capture buffer (must NOT go into the small _buf union).
+		if (_valget_capturing && _rx_payload_length <= UBX_VALGET_RX_MAX) {
+			_rx_state = UBX_RXMSG_HANDLE;
+			_valget_len = 0;
+
+		} else {
+			_rx_state = UBX_RXMSG_DISABLE;
+		}
+
+		break;
+
 	default:
 		_rx_state = UBX_RXMSG_DISABLE;	// disable all other messages
 		break;
@@ -1821,6 +2302,24 @@ GPSDriverUBX::payloadRxAdd(const uint8_t b)
 	uint8_t *p_buf = (uint8_t *)&_buf;
 
 	p_buf[_rx_payload_index] = b;
+
+	if (++_rx_payload_index >= _rx_payload_length) {
+		ret = 1;	// payload received completely
+	}
+
+	return ret;
+}
+
+int	// -1 = error, 0 = ok, 1 = payload completed
+GPSDriverUBX::payloadRxAddCfgValget(const uint8_t b)
+{
+	// Accumulate the CFG-VALGET response into our dedicated buffer (never _buf: the response
+	// can exceed sizeof(_buf)). payloadRxInit already gated _rx_payload_length <= UBX_VALGET_RX_MAX.
+	if (_valget_len < UBX_VALGET_RX_MAX) {
+		_valget_storage[_valget_len++] = b;
+	}
+
+	int ret = 0;
 
 	if (++_rx_payload_index >= _rx_payload_length) {
 		ret = 1;	// payload received completely
@@ -2699,6 +3198,46 @@ GPSDriverUBX::payloadRxDone()
 		ret = 1;
 		break;
 	}
+
+	case UBX_MSG_CFG_VALGET: {
+			UBX_TRACE_RXMSG("Rx CFG-VALGET");
+
+			// Body after the 4-byte header (version, layer, position[2]) is [key][value] TLVs,
+			// identical encoding to a VALSET body. Walk it, keep non-zero values, append to the
+			// open dump file. Accumulated into _valget_storage (never _buf).
+			if (_valget_dump_fd >= 0 && _valget_len > 4) {
+				const uint8_t *tlv = &_valget_storage[4];
+				const uint16_t tlv_len = (uint16_t)(_valget_len - 4);
+
+				walkCfgTlv(tlv, tlv_len, [&](uint32_t key, const uint8_t *val, uint8_t vlen) {
+					// non-zero filter
+					bool nonzero = false;
+
+					for (uint8_t i = 0; i < vlen; ++i) {
+						if (val[i] != 0) { nonzero = true; break; }
+					}
+
+					if (!nonzero) { return; }
+
+					char lb[80];
+					int  ln = snprintf(lb, sizeof(lb), "KEY=0x%08x SIZE=%u VALUE=", (unsigned)key, vlen);
+
+					for (uint8_t i = 0; i < vlen; ++i) {
+						ln += snprintf(lb + ln, sizeof(lb) - ln, "%02x%s", val[i], (i + 1 < vlen) ? " " : "");
+					}
+
+					ln += snprintf(lb + ln, sizeof(lb) - ln, "\n");
+
+					::write(_valget_dump_fd, lb, ln);
+					_valget_dump_crc = calculateCRC32((uint32_t)ln, (uint8_t *)lb, _valget_dump_crc);
+					++_valget_dump_count;
+				});
+			}
+
+			_valget_capturing = false;
+			ret = 1;
+			break;
+		}
 
 	case UBX_MSG_ACK_ACK:
 		UBX_TRACE_RXMSG("Rx ACK-ACK");

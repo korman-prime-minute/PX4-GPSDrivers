@@ -780,6 +780,49 @@ typedef struct {
 	uint8_t cfgData;        /**< configuration data (key and value pairs, max 64) */
 } ubx_payload_tx_cfg_valset_t;
 
+/* Tx CFG-VALGET request (protocol version 27+). Body layout matches the CFG-VALSET/VALGET
+ * response header: version(1) + layer(1) + position(2), followed by a list of key IDs
+ * (wildcards allowed: item bits 0xFFFF requests all items in a group). */
+typedef struct {
+	uint8_t  version;       /**< 0 = request */
+	uint8_t  layer;         /**< 0 = RAM, 1 = BBR, 2 = Flash, 7 = Default */
+	uint16_t position;      /**< number of key-value pairs to skip (pagination) */
+	uint32_t keys;          /**< first key ID; more keys may follow contiguously */
+} ubx_payload_tx_cfg_valget_t;
+
+/* CFG-VALGET/VALSET config-key storage-size id, encoded in bits 28-30 of the key ID.
+ * Used to walk an arbitrary key-value TLV body where each value's width is only known
+ * from its key. Mapping: 1->1 byte (L/bit), 2->1 byte (U1), 3->2 bytes (U2),
+ * 4->4 bytes (U4/I4), 5->8 bytes (U8). */
+#define UBX_CFG_KEY_SIZE_ID(key)                (((key) >> 28) & 0x07)
+
+/* Layer byte value (single value, NOT a bitmask) used inside a VALGET request/response. */
+#define UBX_CFG_VALGET_LAYER_RAM                0
+
+/* Max bytes accumulated for one CFG-VALGET response (4-byte header + up to 64 pairs of
+ * key(4) + value(<=8)). Sized generously; responses over this are rejected, not truncated. */
+#define UBX_VALGET_RX_MAX                       1024
+
+/* Max key-value pairs per CFG-VALSET frame (u-blox limit) when re-emitting a config file. */
+#define UBX_VALSET_MAX_KEYS                     64
+
+/* ACK timeout (ms) for config-file VALSET frames. Longer than the default RAM-only
+ * UBX_CONFIG_TIMEOUT because these frames also write the F9P Flash layer, whose erase/program
+ * cycle is acknowledged more slowly by the receiver. */
+#define UBX_CFGFILE_ACK_TIMEOUT                 2000
+
+/* Config-file parsing (loadConfigFromFile). u-center exports one CFG-VALGET per line packing
+ * MANY keys, so a single line's ASCII hex can be thousands of chars and its decoded payload
+ * hundreds-to-thousands of bytes. Sized to hold the largest realistic export line. */
+#define UBX_CFGFILE_LINE_MAX                    16384   // ASCII chars per file line
+#define UBX_CFGFILE_HEX_MAX                     8192    // decoded bytes per file line
+
+/* Config file path and RAM-dump paths on the SD card. */
+#define UBX_CFG_DIR                             PX4_STORAGEDIR "/ublox"
+#define UBX_CFGFILE_PATH                        UBX_CFG_DIR "/f9p_config.txt"
+#define UBX_RAMDUMP_PATH                        UBX_CFG_DIR "/f9p_ramdump.txt"
+#define UBX_RAMDUMP_TMP_PATH                    UBX_CFG_DIR "/.f9p_ramdump.tmp"
+
 /* Tx CFG-NAV5 */
 typedef struct {
 	uint16_t mask;
@@ -997,7 +1040,8 @@ public:
 		     float heading_offset = 0.f,
 		     int32_t uart2_baudrate = 57600,
 		     UBXMode mode = UBXMode::Normal,
-		     float pvt_warn_rate_hz = 9.5f);
+		     float pvt_warn_rate_hz = 9.5f,
+		     bool cfg_file_enabled = false);
 
 	virtual ~GPSDriverUBX();
 
@@ -1006,6 +1050,14 @@ public:
 	int reset(GPSRestartType restart_type) override;
 
 	bool shouldInjectRTCM() override { return _mode != UBXMode::RoverWithMovingBase; }
+
+	/**
+	 * Snapshot the F9P RAM config to a file (single fixed path, overwritten each call).
+	 * Writes to @a tmp_path then atomically renames to @a final_path. Public: triggered
+	 * from the gps module on a (RBF-gated) ground-station request.
+	 * @return number of items written, or <0 on error
+	 */
+	int dumpConfigToFile(const char *tmp_path, const char *final_path);
 
 	enum class Board : uint8_t {
 		unknown = 0,
@@ -1130,6 +1182,7 @@ private:
 	int payloadRxAddMonVer(const uint8_t b);
 	int payloadRxAddNavSat(const uint8_t b);
 	int payloadRxAddNavSvinfo(const uint8_t b);
+	int payloadRxAddCfgValget(const uint8_t b);
 
 	/**
 	 * Finish payload rx
@@ -1147,6 +1200,40 @@ private:
 	 */
 	int waitForAck(const uint16_t msg, const unsigned timeout, const bool report);
 
+	/**
+	 * Value byte width for a config key, from its storage-size id (bits 28-30).
+	 * @return 1, 2, 4 or 8; 0 for an unknown size id
+	 */
+	static uint8_t ubxCfgKeySize(uint32_t key);
+
+	/**
+	 * Walk a CFG-VALGET/VALSET key-value TLV body (after the 4-byte header) and invoke
+	 * @a handler for each [4-byte LE key][value] pair. The VALGET response body and the
+	 * VALSET request body use the identical TLV encoding, so this serves both the config
+	 * file parser and the RAM read-back decoder.
+	 * @param body      pointer to the first key byte (header already skipped)
+	 * @param len       number of TLV bytes available
+	 * @param handler   invoked per pair as handler(key, value_ptr, value_len)
+	 * @return number of pairs walked, or <0 on a truncated trailing pair
+	 */
+	template<typename Handler>
+	int walkCfgTlv(const uint8_t *body, uint16_t len, Handler handler);
+
+	/**
+	 * Provision the receiver from a u-center config .txt on disk (Gen9+ CFG-VALGET dump).
+	 * Parses CFG-VALGET lines, re-emits their key-value pairs as CFG-VALSET frames to the
+	 * RAM layer. Called once at the end of configure(), gated by GPS_UBX_CFGFILE.
+	 * @return number of CFG-VALSET frames applied; <0 only if the file cannot be opened
+	 */
+	int loadConfigFromFile(const char *path);
+
+	/**
+	 * Poll the entire RAM config database (wildcard CFG-VALGET over all known groups),
+	 * filter non-zero values, and append them to the already-open dump file @a fd.
+	 * @return number of non-zero items written, or <0 on error
+	 */
+	int pollAllConfig(int fd, uint32_t &crc);
+
 	const Interface _interface{};
 
 	gps_abstime             _disable_cmd_last{0};
@@ -1156,6 +1243,15 @@ private:
 	ubx_buf_t               _buf{};
 	ubx_decode_state_t      _decode_state{};
 	ubx_rxmsg_state_t       _rx_state{UBX_RXMSG_IGNORE};
+
+	/* CFG-VALGET RAM read-back capture. The response is variable length and can exceed
+	 * sizeof(_buf) (a ~92-byte union), so it is accumulated into its own buffer, never _buf. */
+	uint8_t  _valget_storage[UBX_VALGET_RX_MAX];
+	uint16_t _valget_len{0};
+	bool     _valget_capturing{false};  ///< true only while a pollAllConfig() request is in flight
+	int      _valget_dump_fd{-1};       ///< open dump file the VALGET handler appends to (-1 when idle)
+	uint32_t _valget_dump_crc{0};       ///< running CRC over dump body lines
+	uint32_t _valget_dump_count{0};     ///< non-zero items written this dump
 
 	bool _configured{false};
 	bool _got_posllh{false};
@@ -1197,6 +1293,7 @@ private:
 	const float _heading_offset;
 	const int32_t _uart2_baudrate;
 	const uint32_t _nav_pvt_warn_period_us; ///< warn on NAV-PVT gap exceeding this (derived from UBX_PVT_WRN_HZ)
+	const bool _cfg_file_enabled;           ///< GPS_UBX_CFGFILE: provision from UBX_CFGFILE_PATH at boot
 };
 
 
