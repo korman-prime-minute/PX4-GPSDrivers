@@ -92,6 +92,13 @@ static constexpr char UBX_RXM_RTCM_PREFIX[] = "RTM";
 
 /* Non-blocking [UBXCFG]-tagged process log for the SD config-file / RAM-dump feature.
  * Mirrored to console + UART5 for GUI-side sharing; safe in the RX path. */
+/* PRIME_LOG is a parent-repo-provided non-blocking logger (console + UART mirror).
+ * When this "devices" submodule is built by a parent that lacks it, fall back to
+ * UBX_INFO so the direct PRIME_LOG(...) call sites below still compile. */
+#if !defined(PRIME_LOG)
+#define PRIME_LOG(fmt, ...)   UBX_INFO(fmt, ##__VA_ARGS__)
+#endif
+
 #define UBXCFG_LOG(fmt, ...)  PRIME_LOG("[UBXCFG] " fmt "\r\n", ##__VA_ARGS__)
 
 GPSDriverUBX::GPSDriverUBX(Interface gpsInterface, GPSCallbackPtr callback, void *callback_user,
