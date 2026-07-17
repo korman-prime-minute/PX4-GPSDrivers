@@ -65,7 +65,14 @@
 // CPU time
 #include <drivers/drv_hrt.h>
 
-#include <prime_console_log/prime_console_log.h>
+/* prime_console_log is provided only by the safety_controller parent repo.
+ * Guard the include so this "devices" submodule still compiles under a parent
+ * that lacks the header; PRIME_LOG then falls back to UBX_INFO below. */
+#if defined(__has_include)
+#  if __has_include(<prime_console_log/prime_console_log.h>)
+#    include <prime_console_log/prime_console_log.h>
+#  endif
+#endif
 
 /* RTCM/RTK diagnostic logging throttle intervals [microseconds] */
 static constexpr hrt_abstime UBX_RTCM_LOG_SUMMARY_INTERVAL = 5 * 1000 * 1000;
