@@ -2665,8 +2665,15 @@ GPSDriverUBX::payloadRxDone()
 		{
 		hrt_abstime now = hrt_absolute_time();
 		static hrt_abstime now_prev = 0;
-		if (now_prev != 0 && _nav_pvt_warn_period_us != 0 && hrt_elapsed_time(&now_prev) > _nav_pvt_warn_period_us) {
-			PX4_WARN("UBX NAV-PVT time jump detected - %ums (%dHz)", (unsigned int)hrt_elapsed_time(&now_prev), (uint8_t)(1000000 / hrt_elapsed_time(&now_prev)));
+
+		// Sample the gap once: hrt_elapsed_time() advances between calls, so reading it
+		// separately for the interval and the rate reported two different measurements.
+		// Derive it from `now` so the printed gap matches the timestamp in the CSV line below.
+		const hrt_abstime pvt_gap_us = (now_prev != 0) ? (now - now_prev) : 0;
+
+		if (pvt_gap_us > 0 && _nav_pvt_warn_period_us != 0 && pvt_gap_us > _nav_pvt_warn_period_us) {
+			PX4_WARN("UBX NAV-PVT time jump detected - %.1fms (%.1fHz)",
+				 (double)pvt_gap_us * 1e-3, 1e6 / (double)pvt_gap_us);
 		}
 
 		now_prev = now;
