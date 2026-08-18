@@ -82,6 +82,7 @@ static constexpr hrt_abstime UBX_RTCM_LOG_ABSENT_INTERVAL  = 10 * 1000 * 1000;
 static constexpr char UBX_NAV_DOP_PREFIX[] = "DOP";
 static constexpr char UBX_NAV_PVT_PREFIX[] = "PVT";
 static constexpr char UBX_RXM_RTCM_PREFIX[] = "RTM";
+static constexpr char UBX_NAV_SAT_PREFIX[] = "SAT";
 
 #define MIN(X,Y)              ((X) < (Y) ? (X) : (Y))
 #define SWAP16(X)             ((((X) >>  8) & 0x00ff) | (((X) << 8) & 0xff00))
@@ -2992,6 +2993,30 @@ GPSDriverUBX::payloadRxDone()
 
 		// _satellite_info already populated by payload_rx_add_svinfo(), just add a timestamp
 		_satellite_info->timestamp = gps_absolute_time();
+
+		/* ---- Satellite CSV --------------------------------------------------------
+		 * One line per satellite, same shape as the NAV-PVT CSV above:
+		 *   SAT,timestamp[us],index,count,svid,used,elevation[deg],azimuth[deg],snr[dBHz],prn
+		 * index/count place each row within its message so a burst can be grouped
+		 * back together downstream. used is 0/1. azimuth is stored scaled
+		 * 0..255 == 0..360deg, so scale it back to degrees here. */
+		{
+			const unsigned sat_count = MIN(_satellite_info->count, satellite_info_s::SAT_INFO_MAX_SATELLITES);
+
+			for (unsigned i = 0; i < sat_count; i++) {
+				PRIME_LOG("%s,%llu,%u,%u,%u,%u,%u,%u,%u,%u\r\n",
+					  UBX_NAV_SAT_PREFIX,
+					  (unsigned long long)_satellite_info->timestamp,
+					  i,
+					  sat_count,
+					  (unsigned)_satellite_info->svid[i],
+					  (unsigned)(_satellite_info->used[i] ? 1 : 0),
+					  (unsigned)_satellite_info->elevation[i],
+					  (unsigned)((static_cast<unsigned>(_satellite_info->azimuth[i]) * 360u) / 255u),
+					  (unsigned)_satellite_info->snr[i],
+					  (unsigned)_satellite_info->prn[i]);
+			}
+		}
 
 		ret = 2;
 		break;
