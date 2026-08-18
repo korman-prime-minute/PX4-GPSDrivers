@@ -84,6 +84,34 @@ static constexpr char UBX_NAV_PVT_PREFIX[] = "PVT";
 static constexpr char UBX_RXM_RTCM_PREFIX[] = "RTM";
 static constexpr char UBX_NAV_SAT_PREFIX[] = "SAT";
 
+/* gnssId values from UBX-NAV-SAT. This numbering is u-blox's own (interface
+ * description "GNSS identifiers"), not a cross-vendor standard - RTCM and NMEA
+ * use different constellation numbering, so do not reuse these ids elsewhere. */
+static constexpr unsigned UBX_GNSS_ID_COUNT = 8;
+
+static const char *ubxGnssIdName(uint8_t gnss_id)
+{
+	switch (gnss_id) {
+	case 0: return "GPS";
+
+	case 1: return "SBAS";
+
+	case 2: return "Galileo";
+
+	case 3: return "BeiDou";
+
+	case 4: return "IMES";
+
+	case 5: return "QZSS";
+
+	case 6: return "GLONASS";
+
+	case 7: return "NAVIC";
+
+	default: return "unknown";
+	}
+}
+
 #define MIN(X,Y)              ((X) < (Y) ? (X) : (Y))
 #define SWAP16(X)             ((((X) >>  8) & 0x00ff) | (((X) << 8) & 0xff00))
 
@@ -2125,6 +2153,13 @@ GPSDriverUBX::payloadRxInit()
 
 		} else {
 			memset(_satellite_info, 0, sizeof(*_satellite_info));        // initialize sat info
+			// Cleared together with _satellite_info: a shorter message must not leave
+			// the previous message's constellation ids visible in the trailing slots.
+			// Filled with 0xFF, not 0: 0 is a valid gnssId (GPS), so zeroing would
+			// label every unset entry as GPS - including all of them on the legacy
+			// NAV-SVINFO path, which carries no gnssId at all.
+			memset(_nav_sat_gnss_id, 0xFF, sizeof(_nav_sat_gnss_id));
+			memset(_nav_sat_sv_id, 0xFF, sizeof(_nav_sat_sv_id));
 		}
 
 		break;
@@ -2431,6 +2466,14 @@ GPSDriverUBX::payloadRxAddNavSat(const uint8_t b)
 					}
 
 					break;
+				}
+
+				// Keep the raw constellation/satellite ids: svinfo_svid above is a
+				// lossy legacy mapping (255 whenever the gnssId/svId pair has no
+				// NAV-SVINFO equivalent, e.g. every NavIC satellite).
+				if (sat_index < satellite_info_s::SAT_INFO_MAX_SATELLITES) {
+					_nav_sat_gnss_id[sat_index] = ubx_sat_gnssId;
+					_nav_sat_sv_id[sat_index]   = ubx_sat_svId;
 				}
 
 				_satellite_info->svid[sat_index]	  = svinfo_svid;
@@ -2996,25 +3039,84 @@ GPSDriverUBX::payloadRxDone()
 
 		/* ---- Satellite CSV --------------------------------------------------------
 		 * One line per satellite, same shape as the NAV-PVT CSV above:
-		 *   SAT,timestamp[us],index,count,svid,used,elevation[deg],azimuth[deg],snr[dBHz],prn
-		 * index/count place each row within its message so a burst can be grouped
-		 * back together downstream. used is 0/1. azimuth is stored scaled
-		 * 0..255 == 0..360deg, so scale it back to degrees here. */
+		 *
+		 *   SAT,timestampUs,satIndexInMsg,numSatsInMsg,constellationName,
+		 *   svIdInConstellation,numSatsInConstellation,numSatsUsedInConstellation,
+		 *   isUsedForNav,elevationDeg,azimuthDeg,snrDbHz
+		 *
+		 * Grouped as: position in message, satellite identity, constellation totals,
+		 * then this satellite's own measurements. Column meanings:
+		 *
+		 *   timestampUs                - one value shared by every row of this
+		 *                                message, so a burst is grouped by matching
+		 *                                timestamps
+		 *   satIndexInMsg              - 0-based position of this row in the message
+		 *   numSatsInMsg               - satellites in this message, ALL
+		 *                                constellations (capped at
+		 *                                SAT_INFO_MAX_SATELLITES; a receiver tracking
+		 *                                more than that is truncated here)
+		 *   constellationName          - GPS / SBAS / Galileo / BeiDou / IMES / QZSS /
+		 *                                GLONASS / NAVIC, from the UBX gnssId
+		 *   svIdInConstellation        - satellite number within its constellation
+		 *   numSatsInConstellation     - satellites of THIS row's constellation in
+		 *                                this message; repeated on every row of that
+		 *                                constellation, and sums to numSatsInMsg
+		 *                                across constellations (except for "unknown"
+		 *                                rows, which are not tallied and report 0)
+		 *   numSatsUsedInConstellation - of those, how many have isUsedForNav 1
+		 *   isUsedForNav               - 0/1, is this satellite in the nav solution
+		 *   elevationDeg               - 0 = overhead, 90 = horizon
+		 *   azimuthDeg                 - 0..360; stored scaled 0..255, rescaled here
+		 *   snrDbHz                    - carrier-to-noise; 0 = not tracking
+		 *
+		 * Identity comes from the raw UBX gnssId/svId captured in
+		 * payloadRxAddNavSat(). _satellite_info's own svid/prn columns are
+		 * deliberately NOT logged: they hold the legacy NAV-SVINFO mapping of this
+		 * same pair, are identical to each other, and are lossy (255 for anything
+		 * with no NAV-SVINFO equivalent, e.g. every NavIC satellite). They stay
+		 * populated for the uORB topic, which is what QGC and the ulog read.
+		 *
+		 * svIdInConstellation is the svId byte exactly as the receiver sent it, so it
+		 * is only unique paired with constellationName (GPS 5 and Galileo 5 are
+		 * different satellites). That pair is what u-center displays.
+		 * constellationName "unknown" with svIdInConstellation 255 means the fields
+		 * were never set - the legacy NAV-SVINFO path carries no gnssId/svId. */
 		{
-			const unsigned sat_count = MIN(_satellite_info->count, satellite_info_s::SAT_INFO_MAX_SATELLITES);
+			const unsigned num_sats_in_msg = MIN(_satellite_info->count, satellite_info_s::SAT_INFO_MAX_SATELLITES);
 
-			for (unsigned i = 0; i < sat_count; i++) {
-				PRIME_LOG("%s,%llu,%u,%u,%u,%u,%u,%u,%u,%u\r\n",
+			// Tally each constellation once up front so every row can carry its totals.
+			unsigned num_sats_in_constellation[UBX_GNSS_ID_COUNT] {};
+			unsigned num_sats_used_in_constellation[UBX_GNSS_ID_COUNT] {};
+
+			for (unsigned i = 0; i < num_sats_in_msg; i++) {
+				const uint8_t gnss_id = _nav_sat_gnss_id[i];
+
+				if (gnss_id < UBX_GNSS_ID_COUNT) {
+					num_sats_in_constellation[gnss_id]++;
+
+					if (_satellite_info->used[i]) {
+						num_sats_used_in_constellation[gnss_id]++;
+					}
+				}
+			}
+
+			for (unsigned i = 0; i < num_sats_in_msg; i++) {
+				const uint8_t gnss_id = _nav_sat_gnss_id[i];
+				const bool    gnss_id_known = (gnss_id < UBX_GNSS_ID_COUNT);
+
+				PRIME_LOG("%s,%llu,%u,%u,%s,%u,%u,%u,%u,%u,%u,%u\r\n",
 					  UBX_NAV_SAT_PREFIX,
 					  (unsigned long long)_satellite_info->timestamp,
 					  i,
-					  sat_count,
-					  (unsigned)_satellite_info->svid[i],
+					  num_sats_in_msg,
+					  ubxGnssIdName(gnss_id),
+					  (unsigned)_nav_sat_sv_id[i],
+					  gnss_id_known ? num_sats_in_constellation[gnss_id] : 0u,
+					  gnss_id_known ? num_sats_used_in_constellation[gnss_id] : 0u,
 					  (unsigned)(_satellite_info->used[i] ? 1 : 0),
 					  (unsigned)_satellite_info->elevation[i],
 					  (unsigned)((static_cast<unsigned>(_satellite_info->azimuth[i]) * 360u) / 255u),
-					  (unsigned)_satellite_info->snr[i],
-					  (unsigned)_satellite_info->prn[i]);
+					  (unsigned)_satellite_info->snr[i]);
 			}
 		}
 

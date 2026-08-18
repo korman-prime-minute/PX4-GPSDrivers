@@ -1244,6 +1244,18 @@ private:
 	ubx_decode_state_t      _decode_state{};
 	ubx_rxmsg_state_t       _rx_state{UBX_RXMSG_IGNORE};
 
+	/* --- NAV-SAT constellation side-band -----------------------------------------
+	 * satellite_info_s has no gnssId field and its svid column folds the
+	 * constellation into a legacy NAV-SVINFO number range (lossy: BeiDou spans two
+	 * ranges and NavIC has no range at all). Stash the raw gnssId/svId of each
+	 * entry here at parse time in payloadRxAddNavSat() so payloadRxDone() can log
+	 * the true constellation. Indices match the _satellite_info arrays; both are
+	 * cleared together in payloadRxInit(). Kept local to the driver rather than
+	 * added to the uORB topic so this submodule still builds against a parent
+	 * whose satellite_info_s lacks the field. 0xFF means "not set" (0 is GPS). */
+	uint8_t _nav_sat_gnss_id[satellite_info_s::SAT_INFO_MAX_SATELLITES] {};
+	uint8_t _nav_sat_sv_id[satellite_info_s::SAT_INFO_MAX_SATELLITES] {};
+
 	/* CFG-VALGET RAM read-back capture. The response is variable length and can exceed
 	 * sizeof(_buf) (a ~92-byte union), so it is accumulated into its own buffer, never _buf. */
 	uint8_t  _valget_storage[UBX_VALGET_RX_MAX];
