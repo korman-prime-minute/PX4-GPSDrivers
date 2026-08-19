@@ -806,9 +806,12 @@ typedef struct {
 /* Max key-value pairs per CFG-VALSET frame (u-blox limit) when re-emitting a config file. */
 #define UBX_VALSET_MAX_KEYS                     64
 
-/* ACK timeout (ms) for config-file VALSET frames. Longer than the default RAM-only
- * UBX_CONFIG_TIMEOUT because these frames also write the F9P Flash layer, whose erase/program
- * cycle is acknowledged more slowly by the receiver. */
+/* ACK timeout (ms) for config-file VALSET frames, whatever layer they target. Much longer than
+ * UBX_CONFIG_TIMEOUT: a frame carries up to 64 keys, so it is hundreds of bytes sharing the UART
+ * with the receiver's NAV stream, and a Flash-layer frame additionally waits out an NVM
+ * erase/program cycle. Acks past 250 ms have been measured on a ZED-F9P for RAM-only frames.
+ * Generosity is free here - waitForAck() returns as soon as the ack lands, so this bound is only
+ * ever paid when one is genuinely lost. */
 #define UBX_CFGFILE_ACK_TIMEOUT                 2000
 
 /* Config-file parsing (loadConfigFromFile). u-center exports one CFG-VALGET per line packing
@@ -822,6 +825,25 @@ typedef struct {
 #define UBX_CFGFILE_PATH                        UBX_CFG_DIR "/f9p_config.txt"
 #define UBX_RAMDUMP_PATH                        UBX_CFG_DIR "/f9p_ramdump.txt"
 #define UBX_RAMDUMP_TMP_PATH                    UBX_CFG_DIR "/.f9p_ramdump.tmp"
+
+/* Firmware-baked fallback config, used only when the SD-card copy above is missing or yields
+ * no frames, so a unit with no/blank/corrupt SD card still comes up provisioned. The file is
+ * shipped from the board's extras/ dir into the ROMFS image, which is linked into the firmware
+ * and mounted read-only at /etc, i.e. it is read straight out of internal flash.
+ *
+ * Content is plain ASCII text; the ".data" suffix exists only to make Tools/px_romfs_pruner.py
+ * treat the file as opaque. Left as a .txt the pruner would strip whitespace, delete comment
+ * lines, and hard-fail the build on a stray tab or non-ASCII byte in a fresh u-center export.
+ * Line terminators are not preserved end to end (the repo normalises them to LF), which is
+ * harmless: the parser splits on '\n' and skips '\r' as whitespace. */
+#define UBX_CFGFILE_FW_PATH                     PX4_ROOTFSDIR "/etc/extras/f9p_config.txt.data"
+
+/* Link-baud negotiation (negotiateBaudrate). A ZED-F9P leaves the factory at 38400 while the
+ * board runs its link at SER_GPS1_BAUD, so the driver has to find the receiver before it can
+ * move it. Candidates are probed target-first, so a provisioned unit costs a single poll. */
+#define UBX_BAUD_PROBE_TIMEOUT                  300     ///< ms to wait for the probe's ACK
+#define UBX_BAUD_SWITCH_SETTLE_MS               60      ///< drain the old-baud frame + let the receiver switch
+#define UBX_BAUD_FLASH_ACK_TIMEOUT              2000    ///< the baud VALSET also writes the F9P Flash layer
 
 /* Tx CFG-NAV5 */
 typedef struct {
@@ -1041,7 +1063,8 @@ public:
 		     int32_t uart2_baudrate = 57600,
 		     UBXMode mode = UBXMode::Normal,
 		     float pvt_warn_rate_hz = 9.5f,
-		     bool cfg_file_enabled = false);
+		     bool cfg_file_enabled = false,
+		     bool allow_baud_scan = false);
 
 	virtual ~GPSDriverUBX();
 
@@ -1223,9 +1246,36 @@ private:
 	 * Provision the receiver from a u-center config .txt on disk (Gen9+ CFG-VALGET dump).
 	 * Parses CFG-VALGET lines, re-emits their key-value pairs as CFG-VALSET frames to the
 	 * RAM layer. Called once at the end of configure(), gated by GPS_UBX_CFGFILE.
+	 * @param layers  UBX_CFG_LAYER_* mask the values are written to. An operator-supplied file
+	 *                is persisted (RAM|FLASH), matching u-center's "save to flash". The
+	 *                firmware-baked fallback is RAM-only on purpose: it is replayed on every
+	 *                boot and every reconnect, so persisting it buys nothing while costing an
+	 *                F9P NVM erase/program cycle per frame — finite receiver flash endurance
+	 *                spent for no gain, and measured on hardware at ~308 ms per frame against
+	 *                ~95 ms for the same frames RAM-only (7.1 s vs 2.1 s over a 23-line file).
 	 * @return number of CFG-VALSET frames applied; <0 only if the file cannot be opened
 	 */
-	int loadConfigFromFile(const char *path);
+	int loadConfigFromFile(const char *path, uint8_t layers);
+
+	/**
+	 * Find the baud rate the receiver is currently talking at, then move both ends to
+	 * @a target. Only ever called when the gps module says a scan is allowed (once per boot,
+	 * on the ground) — see _allow_baud_scan.
+	 * @param target  desired link baud (SER_GPS1_BAUD, or the heading-mode rate)
+	 * @param actual  out: baud the link ended up on; == target on success, otherwise the
+	 *                baud the receiver was found at (degraded, but a working link)
+	 * @return 0 if the receiver answered at some baud, -1 if no candidate answered at all
+	 */
+	int negotiateBaudrate(unsigned target, unsigned &actual);
+
+	/**
+	 * Poll the single key CFG-UART1-BAUDRATE and wait for the ACK. Non-mutating, small
+	 * response, and a checksum-valid reply is positive proof the current host baud matches
+	 * the receiver (the F9P streams NAV-PVT continuously, so "bytes arrived" proves nothing).
+	 * @param uart1_baudrate out: the receiver's own view of its UART1 baud, when reported
+	 * @return true if the receiver answered
+	 */
+	bool probeAtCurrentBaudrate(uint32_t &uart1_baudrate);
 
 	/**
 	 * Poll the entire RAM config database (wildcard CFG-VALGET over all known groups),
@@ -1261,6 +1311,14 @@ private:
 	uint8_t  _valget_storage[UBX_VALGET_RX_MAX];
 	uint16_t _valget_len{0};
 	bool     _valget_capturing{false};  ///< true only while a pollAllConfig() request is in flight
+
+	/* Single-key CFG-VALGET capture, used by probeAtCurrentBaudrate(). Shares the capture
+	 * buffer and the _valget_capturing gate with the RAM dump, but routes the decoded value
+	 * into a scalar instead of a dump file. The two are never in flight at the same time. */
+	bool     _valget_probe_active{false};
+	bool     _valget_probe_got{false};  ///< the probed key came back in the response
+	uint32_t _valget_probe_key{0};      ///< key the probe asked for
+	uint32_t _valget_probe_value{0};    ///< its value, as reported by the receiver
 	int      _valget_dump_fd{-1};       ///< open dump file the VALGET handler appends to (-1 when idle)
 	uint32_t _valget_dump_crc{0};       ///< running CRC over dump body lines
 	uint32_t _valget_dump_count{0};     ///< non-zero items written this dump
@@ -1306,6 +1364,15 @@ private:
 	const int32_t _uart2_baudrate;
 	const uint32_t _nav_pvt_warn_period_us; ///< warn on NAV-PVT gap exceeding this (derived from UBX_PVT_WRN_HZ)
 	const bool _cfg_file_enabled;           ///< GPS_UBX_CFGFILE: provision from UBX_CFGFILE_PATH at boot
+
+	/* Sweeping the host UART through candidate baud rates drops the GPS for as long as it
+	 * takes, and configure() re-runs on every receive() timeout — including in flight. The
+	 * gps module therefore owns the "already negotiated this boot" latch (it outlives this
+	 * object, which is destroyed and rebuilt on every reconnect) and only ever passes true
+	 * for the first configure() attempt of a boot. */
+	const bool _allow_baud_scan;
+
+	unsigned _link_baudrate{0};             ///< baud the link settled on; guards the config-file replay
 };
 
 

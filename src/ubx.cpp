@@ -140,7 +140,7 @@ static const char *ubxGnssIdName(uint8_t gnss_id)
 GPSDriverUBX::GPSDriverUBX(Interface gpsInterface, GPSCallbackPtr callback, void *callback_user,
 			   sensor_gps_s *gps_position, satellite_info_s *satellite_info, uint8_t dynamic_model,
 			   float heading_offset, int32_t uart2_baudrate, UBXMode mode, float pvt_warn_rate_hz,
-			   bool cfg_file_enabled) :
+			   bool cfg_file_enabled, bool allow_baud_scan) :
 	GPSBaseStationSupport(callback, callback_user),
 	_interface(gpsInterface),
 	_gps_position(gps_position),
@@ -150,7 +150,8 @@ GPSDriverUBX::GPSDriverUBX(Interface gpsInterface, GPSCallbackPtr callback, void
 	_heading_offset(heading_offset),
 	_uart2_baudrate(uart2_baudrate),
 	_nav_pvt_warn_period_us(pvt_warn_rate_hz > 0.f ? (uint32_t)(1e6f / pvt_warn_rate_hz) : 0),
-	_cfg_file_enabled(cfg_file_enabled)
+	_cfg_file_enabled(cfg_file_enabled),
+	_allow_baud_scan(allow_baud_scan)
 {
 	/* Emit CSV headers for UBX messages (PVT, DOP) once at driver construction */
 	// PX4_INFO_RAW("PVT,now_us,iTOW,year,month,day,hour,min,sec,valid,tAcc,nano,fixType,flags,numSV,lon,lat,height,hMSL,hAcc,vAcc,velN,velE,velD,gSpeed,headMot,sAcc,headAcc,pDOP,headVeh\r\n");
@@ -180,162 +181,51 @@ GPSDriverUBX::configure(unsigned &baudrate, const GPSConfig &config)
 				 (UBX_TX_CFG_PRT_PROTO_UBX | UBX_TX_CFG_PRT_PROTO_RTCM) :
 				 UBX_TX_CFG_PRT_PROTO_UBX;
 
+	/* Only the disabled CFG-PRT paths below (kept as commented-out reference) consume these. */
+	(void)cfg_prt;
+	(void)out_proto_mask;
+	(void)in_proto_mask;
+
 	const bool auto_baudrate = baudrate == 0;
 	const uint32_t DEFAULT_BAUDRATE = 115200;
 
 	if (_interface == Interface::UART) {
 
-		/* try different baudrates */
-		const unsigned baudrates[] = {DEFAULT_BAUDRATE};
-
-		unsigned baud_i;
-		unsigned desired_baudrate = auto_baudrate ? UBX_BAUDRATE_M8_AND_NEWER : baudrate;
+		/* Link baud. SER_GPS1_BAUD (or the heading-mode rate) is the TARGET; the receiver may
+		 * currently be at something else entirely (a fresh ZED-F9P ships at 38400), so the
+		 * target is not assumed, it is negotiated. */
+		unsigned target = auto_baudrate ? DEFAULT_BAUDRATE : baudrate;
 
 		if ((_mode == UBXMode::RoverWithMovingBaseUART1) || (_mode == UBXMode::MovingBaseUART1)) {
-			desired_baudrate = UART1_BAUDRATE_HEADING;
+			target = UART1_BAUDRATE_HEADING;
 		}
 
-		for (baud_i = 0; baud_i < sizeof(baudrates) / sizeof(baudrates[0]); baud_i++) {
-			unsigned test_baudrate = baudrates[baud_i];
+		unsigned actual = target;
 
-			if (!auto_baudrate && baudrate != test_baudrate) {
-				continue; // skip to next baudrate
+		if (_allow_baud_scan) {
+			if (negotiateBaudrate(target, actual) < 0) {
+				return -1;   // nothing answered at any candidate baud
 			}
 
-			UBX_DEBUG("baudrate set to %i", test_baudrate);
+		} else {
+			/* Reconnect path: the link baud was already negotiated earlier this boot, so
+			 * assume it. A scan here would walk the host UART through wrong baud rates, and
+			 * configure() re-runs on every receive() timeout — including in flight. */
+			setBaudrate(target);
 
-			setBaudrate(test_baudrate);
-
-			/* flush input and wait for at least 20 ms silence */
 			decodeInit();
 			receive(20);
 			decodeInit();
-
-			// === DISABLED PERIPHERAL CONFIG WRITE ===
-			// Originally: probe CFG-VALSET (proto v27+) by configuring UART1 framing
-			// (1 stop bit, 8 data bits, no parity) + enable UBX in/out and disable NMEA.
-			// Useful when host wants the receiver's UART1 to speak pure UBX so the
-			// parser is not polluted by NMEA sentences. Disabled to leave UART1
-			// framing/protocols at whatever the receiver was provisioned with.
-			// try CFG-VALSET: if we get an ACK we know we can use protocol version 27+
-			int cfg_valset_msg_size = initCfgValset();
-			(void)cfg_valset_msg_size; // unused once writes commented out
-			// cfg_valset_msg_size = initCfgValset();
-			// // UART1
-			// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1_STOPBITS, 1, cfg_valset_msg_size);
-			// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1_DATABITS, 0, cfg_valset_msg_size);
-			// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1_PARITY, 0, cfg_valset_msg_size);
-			// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1INPROT_UBX, 1, cfg_valset_msg_size);
-			// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1INPROT_NMEA, 0, cfg_valset_msg_size);
-			// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1OUTPROT_UBX, 1, cfg_valset_msg_size);
-			// cfgValset<uint8_t>(UBX_CFG_KEY_CFG_UART1OUTPROT_NMEA, 0, cfg_valset_msg_size);
-			// // TODO: are we ever connected to UART2?
-
-			// Note: USB protocol settings are handled later in the configureDevice function.
-
-			bool cfg_valset_success = true;
-
-			// if (sendMessage(UBX_MSG_CFG_VALSET, (uint8_t *)&_buf, cfg_valset_msg_size)) {
-
-			// 	// Note: The M10 comes up sending NMEA sentences at 9600. It can't
-			// 	// respond with an ACK until the current sentence has completed transmission.
-			// 	// This can take over a second so need a large timeout on this particular wait.
-			// 	// Once it has acked this it will turn off the NMEA sentences and all is good
-			// 	// for future transactions.
-			// 	if (waitForAck(UBX_MSG_CFG_VALSET, 2000, true) == 0) {
-			// 		cfg_valset_success = true;
-			// 	}
-			// }
-
-			if (cfg_valset_success) {
-				_proto_ver_27_or_higher = true;
-				// === DISABLED PERIPHERAL CONFIG WRITE ===
-				// Originally: CFG-VALSET UBX_CFG_KEY_CFG_UART1_BAUDRATE = 57600 — set
-				// the receiver's UART1 baud rate so host and receiver agree on link
-				// speed. Useful when the receiver is currently at a different baud
-				// than the host expects. Disabled: assume receiver is already at
-				// the link baud (host-side setBaudrate() below still runs).
-				// Now we only have to change the baudrate
-				// cfg_valset_msg_size = initCfgValset();
-				desired_baudrate = DEFAULT_BAUDRATE;
-				// cfgValset<uint32_t>(UBX_CFG_KEY_CFG_UART1_BAUDRATE, desired_baudrate, cfg_valset_msg_size);
-				//
-				// if (!sendMessage(UBX_MSG_CFG_VALSET, (uint8_t *)&_buf, cfg_valset_msg_size)) {
-				// 	continue;
-				// }
-				//
-				// /* no ACK is expected here, but read the buffer anyway in case we actually get an ACK */
-				// waitForAck(UBX_MSG_CFG_VALSET, UBX_CONFIG_TIMEOUT, false);
-
-			} else {
-				_proto_ver_27_or_higher = false;
-
-				UBX_DEBUG("trying old protocol");
-
-				// === DISABLED PERIPHERAL CONFIG WRITE ===
-				// Originally (pre-v27 fallback): two CFG-PRT messages.
-				// 1st - tell receiver's UART1 + USB ports to accept UBX (and RTCM
-				//       when running as RTCM in/out) and emit only UBX/RTCM, at
-				//       the currently-probed baud rate.
-				// 2nd - change the receiver's UART1/USB baud rate to desired_baudrate.
-				// Useful on legacy u-blox 5/6/7/8 modules that lack the
-				// configuration database. Disabled to leave port settings as
-				// provisioned; we still suppress this code path by suppressing
-				// re-probing, and (void) avoids unused-var warnings.
-				(void)cfg_prt; (void)in_proto_mask; (void)out_proto_mask; (void)test_baudrate;
-				// memset(cfg_prt, 0, 2 * sizeof(ubx_payload_tx_cfg_prt_t));
-				// cfg_prt[0].portID       = UBX_TX_CFG_PRT_PORTID;
-				// cfg_prt[0].mode         = UBX_TX_CFG_PRT_MODE;
-				// cfg_prt[0].baudRate     = test_baudrate;
-				// cfg_prt[0].inProtoMask  = in_proto_mask;
-				// cfg_prt[0].outProtoMask = out_proto_mask;
-				// cfg_prt[1].portID       = UBX_TX_CFG_PRT_PORTID_USB;
-				// cfg_prt[1].mode         = UBX_TX_CFG_PRT_MODE;
-				// cfg_prt[1].baudRate     = test_baudrate;
-				// cfg_prt[1].inProtoMask  = in_proto_mask;
-				// cfg_prt[1].outProtoMask = out_proto_mask;
-				//
-				// if (!sendMessage(UBX_MSG_CFG_PRT, (uint8_t *)cfg_prt, 2 * sizeof(ubx_payload_tx_cfg_prt_t))) {
-				// 	continue;
-				// }
-				//
-				// if (waitForAck(UBX_MSG_CFG_PRT, UBX_CONFIG_TIMEOUT, false) < 0) {
-				// 	/* try next baudrate */
-				// 	continue;
-				// }
-
-				if (auto_baudrate) {
-					desired_baudrate = UBX_TX_CFG_PRT_BAUDRATE;
-				}
-
-				// /* Send a CFG-PRT message again, this time change the baudrate */
-				// cfg_prt[0].baudRate = desired_baudrate;
-				// cfg_prt[1].baudRate = desired_baudrate;
-				//
-				// if (!sendMessage(UBX_MSG_CFG_PRT, (uint8_t *)cfg_prt, 2 * sizeof(ubx_payload_tx_cfg_prt_t))) {
-				// 	continue;
-				// }
-				//
-				// /* no ACK is expected here, but read the buffer anyway in case we actually get an ACK */
-				// waitForAck(UBX_MSG_CFG_PRT, UBX_CONFIG_TIMEOUT, false);
-			}
-
-			if (desired_baudrate != test_baudrate) {
-				setBaudrate(desired_baudrate);
-
-				decodeInit();
-				receive(20);
-				decodeInit();
-			}
-
-			/* at this point we have correct baudrate on both ends */
-			baudrate = desired_baudrate;
-			break;
 		}
 
-		if (baud_i >= sizeof(baudrates) / sizeof(baudrates[0])) {
-			return -1;	// connection and/or baudrate detection failed
-		}
+		baudrate = actual;
+		_link_baudrate = actual;
+
+		/* No CFG-VALSET probe is sent (all peripheral config writes are disabled in this
+		 * tree, see configureDevice), so assume a modern receiver and take the v27+ path.
+		 * negotiateBaudrate() has in fact already proven v27+ when it ran: its probe is a
+		 * CFG-VALGET, which only exists on protocol version 27 and up. */
+		_proto_ver_27_or_higher = true;
 
 	} else if (_interface == Interface::SPI) {
 
@@ -428,12 +318,27 @@ GPSDriverUBX::configure(unsigned &baudrate, const GPSConfig &config)
 	// 	}
 	// }
 
-	/* Provision the receiver from a config file on the SD card, if enabled (GPS_UBX_CFGFILE).
-	 * Runs once here, after the link baud is locked and the device is responsive, but before
-	 * output-mode/RTCM setup. Failures never abort bring-up (see loadConfigFromFile). UART only:
-	 * the config file targets the F9P's own port config which is set over the host UART link. */
+	/* Provision the receiver from a config file, if enabled (GPS_UBX_CFGFILE). Runs here, after
+	 * the link baud is locked and the device is responsive, but before output-mode/RTCM setup.
+	 * Failures never abort bring-up (see loadConfigFromFile). UART only: the config file targets
+	 * the F9P's own port config which is set over the host UART link.
+	 *
+	 * The SD-card copy wins, so an operator upload always takes effect. Falling back on <= 0
+	 * (not just < 0) also covers an SD file that opens but yields nothing usable — blank,
+	 * truncated, or all-garbage — which must not leave the receiver unprovisioned. A file that
+	 * applied even one frame is treated as the operator's intent and is NOT mixed with the
+	 * firmware copy.
+	 *
+	 * The two differ in target layer. An operator upload is persisted into the receiver's own
+	 * NVM (RAM|FLASH) so it survives a power cycle, as u-center would. The firmware copy is
+	 * RAM-only: it is replayed on every boot and every reconnect anyway, so persisting it buys
+	 * nothing and would burn an F9P flash erase/program cycle per frame — which also costs
+	 * seconds of bring-up, since the receiver acks an NVM write far more slowly. */
 	if (_cfg_file_enabled && _interface == Interface::UART) {
-		loadConfigFromFile(UBX_CFGFILE_PATH);
+		if (loadConfigFromFile(UBX_CFGFILE_PATH, UBX_CFG_LAYER_RAM | UBX_CFG_LAYER_FLASH) <= 0) {
+			UBXCFG_LOG("provision: falling back to firmware config %s", UBX_CFGFILE_FW_PATH);
+			loadConfigFromFile(UBX_CFGFILE_FW_PATH, UBX_CFG_LAYER_RAM);
+		}
 	}
 
 	if (_output_mode == OutputMode::GPSAndRTCM || _output_mode == OutputMode::RTCM || _mode == UBXMode::MovingBaseUART1) {
@@ -1217,8 +1122,171 @@ static int ubx_hex_byte(const char *s)
 	return (hi << 4) | lo;
 }
 
-int GPSDriverUBX::loadConfigFromFile(const char *path)
+/* Candidate link baud rates for negotiateBaudrate(), probed after the target. Covers the
+ * ZED-F9P factory default (38400) plus the other rates u-center can leave a module at. */
+static const unsigned kUbxBaudCandidates[] = {
+	38400, 115200, 9600, 57600, 230400, 460800, 19200, 921600, 4800
+};
+
+bool GPSDriverUBX::probeAtCurrentBaudrate(uint32_t &uart1_baudrate)
 {
+	ubx_payload_tx_cfg_valget_t req{};
+	req.version  = 0;
+	req.layer    = UBX_CFG_VALGET_LAYER_RAM;
+	req.position = 0;
+	req.keys     = UBX_CFG_KEY_CFG_UART1_BAUDRATE;
+
+	_valget_len          = 0;
+	_valget_probe_key    = UBX_CFG_KEY_CFG_UART1_BAUDRATE;
+	_valget_probe_value  = 0;
+	_valget_probe_got    = false;
+	_valget_probe_active = true;
+	_valget_capturing    = true;   // opens the VALGET rx path (payloadRxInit gates on this)
+
+	bool acked = false;
+
+	if (sendMessage(UBX_MSG_CFG_VALGET, (const uint8_t *)&req, sizeof(req))) {
+		acked = (waitForAck(UBX_MSG_CFG_VALGET, UBX_BAUD_PROBE_TIMEOUT, false) == 0);
+	}
+
+	_valget_capturing    = false;
+	_valget_probe_active = false;
+
+	if (_valget_probe_got) {
+		uart1_baudrate = _valget_probe_value;
+	}
+
+	// Either half proves the link is framed correctly: the VALGET response and the ACK are both
+	// checksummed UBX frames, and a mismatched baud produces neither.
+	return acked || _valget_probe_got;
+}
+
+int GPSDriverUBX::negotiateBaudrate(unsigned target, unsigned &actual)
+{
+	uint32_t dev_baud = 0;
+	unsigned found = 0;
+
+	/* 1. Find the receiver. Target first, so a unit that is already provisioned costs exactly
+	 *    one poll and the link comes up as fast as it did before this function existed. */
+	for (unsigned i = 0; i <= sizeof(kUbxBaudCandidates) / sizeof(kUbxBaudCandidates[0]); ++i) {
+		const unsigned cand = (i == 0) ? target : kUbxBaudCandidates[i - 1];
+
+		if (i > 0 && cand == target) {
+			continue;   // already probed as the target
+		}
+
+		setBaudrate(cand);
+
+		decodeInit();
+		receive(20);
+		decodeInit();
+
+		if (probeAtCurrentBaudrate(dev_baud)) {
+			found = cand;
+			break;
+		}
+	}
+
+	if (found == 0) {
+		UBX_ERR("UBX baud: no response at any candidate baud");
+		UBXCFG_LOG("baud: no response at any candidate baud");
+		return -1;
+	}
+
+	if (found == target) {
+		actual = target;
+		UBXCFG_LOG("baud: receiver already at %u", target);
+		return 0;
+	}
+
+	UBXCFG_LOG("baud: receiver found at %u (reports UART1=%u), moving to %u",
+		   found, (unsigned)dev_baud, target);
+
+	/* 2. Move the receiver, RAM|BBR only. Deliberately not Flash yet: a Flash write means an
+	 *    erase/program cycle the receiver services before it answers again, which would make
+	 *    the verify below race the NVM write. Persistence is handled in step 5, once the new
+	 *    link is confirmed. */
+	int msg_size = initCfgValset();
+	_buf.payload_tx_cfg_valset.layers = UBX_CFG_LAYER_RAM | UBX_CFG_LAYER_BBR;
+
+	if (!cfgValset<uint32_t>(UBX_CFG_KEY_CFG_UART1_BAUDRATE, (uint32_t)target, msg_size)) {
+		return -1;
+	}
+
+	if (!sendMessage(UBX_MSG_CFG_VALSET, (uint8_t *)&_buf, msg_size)) {
+		UBX_ERR("UBX baud: VALSET write failed");
+		return -1;
+	}
+
+	/* 3. Do NOT wait for that ACK. The receiver reconfigures its UART as soon as it has
+	 *    processed the frame, so the ACK is either cut off mid-byte or already sent at the new
+	 *    rate. Let the frame drain at the old rate, then move the host. */
+	gps_usleep(UBX_BAUD_SWITCH_SETTLE_MS * 1000);
+	setBaudrate(target);
+
+	decodeInit();
+	receive(20);
+	decodeInit();
+
+	/* 4. Verify. Retry a few times: the receiver may still be finishing the port switch, and a
+	 *    single missed poll must not cost us the target baud. */
+	bool confirmed = false;
+
+	for (int attempt = 0; attempt < 3 && !confirmed; ++attempt) {
+		confirmed = probeAtCurrentBaudrate(dev_baud);
+	}
+
+	if (!confirmed) {
+		/* Go back to the baud that demonstrably worked rather than lose the receiver: a
+		 * degraded link still produces a position, and the reconnect path will not scan. */
+		UBX_WARN("UBX baud: switch to %u not confirmed, reverting to %u", target, found);
+		setBaudrate(found);
+
+		decodeInit();
+		receive(20);
+		decodeInit();
+
+		if (probeAtCurrentBaudrate(dev_baud)) {
+			actual = found;
+			UBXCFG_LOG("baud: DEGRADED, staying at %u (target %u refused)", found, target);
+			return 0;
+		}
+
+		UBXCFG_LOG("baud: receiver lost after switch attempt (was %u, target %u)", found, target);
+		return -1;
+	}
+
+	/* 5. Persist to the receiver's Flash layer so an independent F9P reset (brown-out,
+	 *    watchdog) comes back at the target instead of the factory default. The reconnect path
+	 *    never scans, so a receiver that silently reverted would be unreachable in flight.
+	 *    Slow ACK: this one is an NVM erase/program. Failure is non-fatal — the link is up. */
+	msg_size = initCfgValset();
+	_buf.payload_tx_cfg_valset.layers = UBX_CFG_LAYER_FLASH;
+
+	if (cfgValset<uint32_t>(UBX_CFG_KEY_CFG_UART1_BAUDRATE, (uint32_t)target, msg_size)
+	    && sendMessage(UBX_MSG_CFG_VALSET, (uint8_t *)&_buf, msg_size)) {
+		if (waitForAck(UBX_MSG_CFG_VALSET, UBX_BAUD_FLASH_ACK_TIMEOUT, false) < 0) {
+			UBX_WARN("UBX baud: %u not persisted to F9P flash (link is up)", target);
+			UBXCFG_LOG("baud: link at %u but flash-layer persist NAK/timeout", target);
+		}
+
+	} else {
+		UBX_WARN("UBX baud: flash-layer persist write failed (link is up)");
+	}
+
+	actual = target;
+	UBXCFG_LOG("baud: link established at %u (was %u)", target, found);
+	return 0;
+}
+
+int GPSDriverUBX::loadConfigFromFile(const char *path, uint8_t layers)
+{
+	/* Generous for every layer mask, deliberately. A timeout only costs wall-clock when an ack is
+	 * genuinely lost - waitForAck() returns the moment it arrives - so there is nothing to win by
+	 * tightening it, and plenty to lose: a 64-key frame is hundreds of bytes sharing the UART with
+	 * the receiver's NAV stream, and acks past 250 ms were observed on hardware. */
+	const unsigned ack_timeout = UBX_CFGFILE_ACK_TIMEOUT;
+
 	const int fd = ::open(path, O_RDONLY);
 
 	if (fd < 0) {
@@ -1251,6 +1319,7 @@ int GPSDriverUBX::loadConfigFromFile(const char *path)
 	unsigned frames = 0;
 	unsigned nak = 0;
 	unsigned skipped = 0;
+	unsigned filtered = 0;   // key-value pairs dropped as unsafe to replay
 
 	// Manual line reader over the fd (no stdio: bounded memory, no NuttX buffering surprises).
 	char   rd[256];
@@ -1390,16 +1459,27 @@ int GPSDriverUBX::loadConfigFromFile(const char *path)
 		auto flush_frame = [&]() -> bool {
 			if (keys_in_frame == 0) { return true; }
 
-			const bool ok = sendMessage(UBX_MSG_CFG_VALSET, valset, (uint16_t)msg_size);
+			/* One retry. A VALSET frame can carry 64 keys, so it is hundreds of bytes that share
+			 * the UART with the receiver's NAV output; a single ack can be late or lost without
+			 * anything actually being wrong. Resending is safe because a VALSET is idempotent -
+			 * if the frame did land and only its ack went missing, the second one just writes
+			 * the same values again. Losing 64 config items to one dropped ack is not. */
+			bool acked = false;
 
-			if (!ok) {
-				UBX_ERR("UBX cfg line %u: UART write failed", lineno);
-				return false;
+			for (int attempt = 0; attempt < 2 && !acked; ++attempt) {
+				if (!sendMessage(UBX_MSG_CFG_VALSET, valset, (uint16_t)msg_size)) {
+					UBX_ERR("UBX cfg line %u: UART write failed", lineno);
+					return false;
+				}
+
+				acked = (waitForAck(UBX_MSG_CFG_VALSET, ack_timeout, true) == 0);
+
+				if (!acked && attempt == 0) {
+					UBX_WARN("UBX cfg line %u: no ack for VALSET, retrying once", lineno);
+				}
 			}
 
-			// Longer ACK wait than the default RAM timeout: these VALSET frames also write the
-			// F9P Flash layer (erase/program), which the receiver acknowledges more slowly.
-			if (waitForAck(UBX_MSG_CFG_VALSET, UBX_CFGFILE_ACK_TIMEOUT, true) < 0) {
+			if (!acked) {
 				UBX_WARN("UBX cfg line %u: device NAK/timeout for VALSET", lineno);
 				++nak;
 
@@ -1413,11 +1493,10 @@ int GPSDriverUBX::loadConfigFromFile(const char *path)
 		};
 
 		auto start_frame = [&]() {
-			// 4-byte VALSET header: version=0, layers, reserved[2]=0.
-			// Apply to RAM (takes effect immediately for this session) AND Flash (persists
-			// in the F9P's own NVM across power cycles, like u-center's "save to flash").
+			// 4-byte VALSET header: version=0, layers, reserved[2]=0. Layer mask comes from the
+			// caller: see loadConfigFromFile()'s @a layers parameter.
 			valset[0] = 0;
-			valset[1] = UBX_CFG_LAYER_RAM | UBX_CFG_LAYER_FLASH;
+			valset[1] = layers;
 			valset[2] = 0;
 			valset[3] = 0;
 			msg_size = 4;
@@ -1431,6 +1510,24 @@ int GPSDriverUBX::loadConfigFromFile(const char *path)
 		const int pairs = walkCfgTlv(tlv, tlv_len,
 					     [&](uint32_t key, const uint8_t *val, uint8_t vlen) {
 			if (!io_ok) { return; }
+
+			// Never let a config file move the host link baud. PX4 owns it via SER_GPS1_BAUD
+			// and negotiateBaudrate() already put both ends there; a file carrying a different
+			// value would kill the UART the instant this frame is ACKed, mid-bring-up, and the
+			// symptom would look like a dead GPS rather than a bad config file.
+			if (key == UBX_CFG_KEY_CFG_UART1_BAUDRATE && _link_baudrate != 0) {
+				uint32_t v = 0;
+				memcpy(&v, val, vlen > sizeof(v) ? sizeof(v) : vlen);
+
+				if (v != _link_baudrate) {
+					UBX_WARN("UBX cfg line %u: dropping UART1 baud %u (link is %u)",
+						 lineno, (unsigned)v, _link_baudrate);
+					UBXCFG_LOG("provision: dropped UART1-BAUDRATE %u, link is %u",
+						   (unsigned)v, _link_baudrate);
+					++filtered;
+					return;
+				}
+			}
 
 			// Would this pair overflow the frame buffer or the 64-key limit? flush first.
 			if (keys_in_frame >= UBX_VALSET_MAX_KEYS ||
@@ -1471,7 +1568,8 @@ int GPSDriverUBX::loadConfigFromFile(const char *path)
 		UBX_WARN("UBX cfg: no CFG-VALGET lines found in %s", path);
 	}
 
-	UBX_INFO("UBX cfg: %s frames=%u nak=%u skipped=%u", path, frames, nak, skipped);
+	UBX_INFO("UBX cfg: %s frames=%u nak=%u skipped=%u filtered=%u layers=0x%02x",
+		 path, frames, nak, skipped, filtered, (unsigned)layers);
 	return (int)frames;
 }
 
@@ -3349,6 +3447,20 @@ GPSDriverUBX::payloadRxDone()
 
 	case UBX_MSG_CFG_VALGET: {
 			UBX_TRACE_RXMSG("Rx CFG-VALGET");
+
+			// Single-key probe (probeAtCurrentBaudrate): pull just the requested key's value
+			// out into a scalar. Checked before the dump path; the two are never both active.
+			if (_valget_probe_active && _valget_len > 4) {
+				walkCfgTlv(&_valget_storage[4], (uint16_t)(_valget_len - 4),
+				[&](uint32_t key, const uint8_t *val, uint8_t vlen) {
+					if (key != _valget_probe_key) { return; }
+
+					uint32_t v = 0;
+					memcpy(&v, val, vlen > sizeof(v) ? sizeof(v) : vlen);
+					_valget_probe_value = v;
+					_valget_probe_got = true;
+				});
+			}
 
 			// Body after the 4-byte header (version, layer, position[2]) is [key][value] TLVs,
 			// identical encoding to a VALSET body. Walk it, keep non-zero values, append to the
