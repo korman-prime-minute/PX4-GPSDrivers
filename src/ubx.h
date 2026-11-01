@@ -1303,8 +1303,19 @@ private:
 	 * cleared together in payloadRxInit(). Kept local to the driver rather than
 	 * added to the uORB topic so this submodule still builds against a parent
 	 * whose satellite_info_s lacks the field. 0xFF means "not set" (0 is GPS). */
+#if !defined(GPS_UBX_RAW_TOPICS)
 	uint8_t _nav_sat_gnss_id[satellite_info_s::SAT_INFO_MAX_SATELLITES] {};
 	uint8_t _nav_sat_sv_id[satellite_info_s::SAT_INFO_MAX_SATELLITES] {};
+#else
+	/* Raw NAV-PVT / NAV-SAT for a parent that defines these uORB topics (replaces the CSV
+	 * lines and the side-band arrays above). _nav_sat_raw is filled entry by entry in
+	 * payloadRxAddNavSat() and published once the message completes. */
+	static_assert(ubx_nav_sat_s::MAX_SATELLITES == satellite_info_s::SAT_INFO_MAX_SATELLITES,
+		      "ubx_nav_sat is indexed like satellite_info");
+	ubx_nav_sat_s _nav_sat_raw{};
+	uORB::PublicationMulti<ubx_nav_pvt_s> _ubx_nav_pvt_pub{ORB_ID(ubx_nav_pvt)};
+	uORB::PublicationMulti<ubx_nav_sat_s> _ubx_nav_sat_pub{ORB_ID(ubx_nav_sat)};
+#endif
 
 	/* CFG-VALGET RAM read-back capture. The response is variable length and can exceed
 	 * sizeof(_buf) (a ~92-byte union), so it is accumulated into its own buffer, never _buf. */

@@ -89,6 +89,7 @@ static constexpr char UBX_NAV_SAT_PREFIX[] = "SAT";
  * use different constellation numbering, so do not reuse these ids elsewhere. */
 static constexpr unsigned UBX_GNSS_ID_COUNT = 8;
 
+#if !defined(GPS_UBX_RAW_TOPICS)
 static const char *ubxGnssIdName(uint8_t gnss_id)
 {
 	switch (gnss_id) {
@@ -111,6 +112,7 @@ static const char *ubxGnssIdName(uint8_t gnss_id)
 	default: return "unknown";
 	}
 }
+#endif // !GPS_UBX_RAW_TOPICS
 
 #define MIN(X,Y)              ((X) < (Y) ? (X) : (Y))
 #define SWAP16(X)             ((((X) >>  8) & 0x00ff) | (((X) << 8) & 0xff00))
@@ -2256,8 +2258,12 @@ GPSDriverUBX::payloadRxInit()
 			// Filled with 0xFF, not 0: 0 is a valid gnssId (GPS), so zeroing would
 			// label every unset entry as GPS - including all of them on the legacy
 			// NAV-SVINFO path, which carries no gnssId at all.
+#if defined(GPS_UBX_RAW_TOPICS)
+			_nav_sat_raw = {};
+#else
 			memset(_nav_sat_gnss_id, 0xFF, sizeof(_nav_sat_gnss_id));
 			memset(_nav_sat_sv_id, 0xFF, sizeof(_nav_sat_sv_id));
+#endif
 		}
 
 		break;
@@ -2490,6 +2496,12 @@ GPSDriverUBX::payloadRxAddNavSat(const uint8_t b)
 		if (_rx_payload_index == sizeof(ubx_payload_rx_nav_sat_part1_t)) {
 			// Part 1 complete: decode Part 1 buffer
 			_satellite_info->count = MIN(_buf.payload_rx_nav_sat_part1.numSvs, satellite_info_s::SAT_INFO_MAX_SATELLITES);
+#if defined(GPS_UBX_RAW_TOPICS)
+			// Part 2 reuses _buf, so the header must be captured now.
+			_nav_sat_raw.itow    = _buf.payload_rx_nav_sat_part1.iTOW;
+			_nav_sat_raw.num_svs = _buf.payload_rx_nav_sat_part1.numSvs;
+			_nav_sat_raw.count   = _satellite_info->count;
+#endif
 			UBX_TRACE_SVINFO("SAT len %u  numCh %u", (unsigned)_rx_payload_length,
 					 (unsigned)_buf.payload_rx_nav_sat_part1.numSvs);
 		}
@@ -2570,12 +2582,23 @@ GPSDriverUBX::payloadRxAddNavSat(const uint8_t b)
 				// lossy legacy mapping (255 whenever the gnssId/svId pair has no
 				// NAV-SVINFO equivalent, e.g. every NavIC satellite).
 				if (sat_index < satellite_info_s::SAT_INFO_MAX_SATELLITES) {
+#if defined(GPS_UBX_RAW_TOPICS)
+					_nav_sat_raw.gnss_id[sat_index] = ubx_sat_gnssId;
+					_nav_sat_raw.sv_id[sat_index]   = ubx_sat_svId;
+					_nav_sat_raw.cno[sat_index]     = _buf.payload_rx_nav_sat_part2.cno;
+					_nav_sat_raw.elev[sat_index]    = _buf.payload_rx_nav_sat_part2.elev;
+					_nav_sat_raw.azim[sat_index]    = _buf.payload_rx_nav_sat_part2.azim;
+					_nav_sat_raw.pr_res[sat_index]  = _buf.payload_rx_nav_sat_part2.prRes;
+					_nav_sat_raw.flags[sat_index]   = _buf.payload_rx_nav_sat_part2.flags;
+#else
 					_nav_sat_gnss_id[sat_index] = ubx_sat_gnssId;
 					_nav_sat_sv_id[sat_index]   = ubx_sat_svId;
+#endif
 				}
 
 				_satellite_info->svid[sat_index]	  = svinfo_svid;
-				_satellite_info->used[sat_index]	  = static_cast<uint8_t>(_buf.payload_rx_nav_sat_part2.flags & 0x01);
+				// NAV-SAT flags: bits 0-2 qualityInd, bit 3 svUsed
+				_satellite_info->used[sat_index]	  = static_cast<uint8_t>((_buf.payload_rx_nav_sat_part2.flags >> 3) & 0x01);
 				_satellite_info->elevation[sat_index] = static_cast<uint8_t>(_buf.payload_rx_nav_sat_part2.elev);
 				_satellite_info->azimuth[sat_index]	  = static_cast<uint8_t>(static_cast<float>(_buf.payload_rx_nav_sat_part2.azim) *
 						255.0f / 360.0f);
@@ -2634,7 +2657,7 @@ GPSDriverUBX::payloadRxAddNavSvinfo(const uint8_t b)
 				unsigned sat_index = (_rx_payload_index - sizeof(ubx_payload_rx_nav_svinfo_part1_t)) /
 						     sizeof(ubx_payload_rx_nav_svinfo_part2_t);
 				_satellite_info->svid[sat_index]      = static_cast<uint8_t>(_buf.payload_rx_nav_svinfo_part2.svid);
-				_satellite_info->used[sat_index]      = static_cast<uint8_t>(_buf.payload_rx_nav_svinfo_part2.flags >> 3 & 0x01);
+				_satellite_info->used[sat_index]      = static_cast<uint8_t>(_buf.payload_rx_nav_svinfo_part2.flags & 0x01); // NAV-SVINFO: bit 0 svUsed
 				_satellite_info->elevation[sat_index] = static_cast<uint8_t>(_buf.payload_rx_nav_svinfo_part2.elev);
 				_satellite_info->azimuth[sat_index]   = static_cast<uint8_t>(static_cast<float>(_buf.payload_rx_nav_svinfo_part2.azim) *
 									255.0f / 360.0f);
@@ -2820,6 +2843,46 @@ GPSDriverUBX::payloadRxDone()
 
 		now_prev = now;
 
+#if defined(GPS_UBX_RAW_TOPICS)
+		// Parent provides the ubx_nav_pvt topic: publish the raw epoch instead of the CSV.
+		{
+			const ubx_payload_rx_nav_pvt_t &pvt = _buf.payload_rx_nav_pvt;
+			ubx_nav_pvt_s nav_pvt{};
+			nav_pvt.timestamp = now;
+			nav_pvt.itow      = pvt.iTOW;
+			nav_pvt.year      = pvt.year;
+			nav_pvt.month     = pvt.month;
+			nav_pvt.day       = pvt.day;
+			nav_pvt.hour      = pvt.hour;
+			nav_pvt.min       = pvt.min;
+			nav_pvt.sec       = pvt.sec;
+			nav_pvt.valid     = pvt.valid;
+			nav_pvt.t_acc     = pvt.tAcc;
+			nav_pvt.nano      = pvt.nano;
+			nav_pvt.fix_type  = pvt.fixType;
+			nav_pvt.flags     = pvt.flags;
+			nav_pvt.flags2    = pvt.flags2;
+			nav_pvt.num_sv    = pvt.numSV;
+			nav_pvt.lon       = pvt.lon;
+			nav_pvt.lat       = pvt.lat;
+			nav_pvt.height    = pvt.height;
+			nav_pvt.h_msl     = pvt.hMSL;
+			nav_pvt.h_acc     = pvt.hAcc;
+			nav_pvt.v_acc     = pvt.vAcc;
+			nav_pvt.vel_n     = pvt.velN;
+			nav_pvt.vel_e     = pvt.velE;
+			nav_pvt.vel_d     = pvt.velD;
+			nav_pvt.g_speed   = pvt.gSpeed;
+			nav_pvt.head_mot  = pvt.headMot;
+			nav_pvt.s_acc     = pvt.sAcc;
+			nav_pvt.head_acc  = pvt.headAcc;
+			nav_pvt.p_dop     = pvt.pDOP;
+			nav_pvt.flags3    = pvt.flags3;
+			// headVeh exists only in the UBX8+ payload length
+			nav_pvt.head_veh  = (_rx_payload_length >= UBX_PAYLOAD_RX_NAV_PVT_SIZE_UBX8) ? pvt.headVeh : 0;
+			_ubx_nav_pvt_pub.publish(nav_pvt);
+		}
+#else
 		PRIME_LOG("%s,%llu,%u,%u,%u,%d,%u,%u,%u,%u\r\n",
 			     UBX_NAV_PVT_PREFIX,
 			     (unsigned long long)now,
@@ -2848,6 +2911,7 @@ GPSDriverUBX::payloadRxDone()
 			     (unsigned)_buf.payload_rx_nav_pvt.sAcc,
 			     (unsigned)_buf.payload_rx_nav_pvt.pDOP,
 			     (unsigned)_buf.payload_rx_nav_pvt.flags3);
+#endif // GPS_UBX_RAW_TOPICS
 
 		//Check if position fix flag is good
 		if ((_buf.payload_rx_nav_pvt.flags & UBX_RX_NAV_PVT_FLAGS_GNSSFIXOK) == 1) {
@@ -3135,6 +3199,16 @@ GPSDriverUBX::payloadRxDone()
 		// _satellite_info already populated by payload_rx_add_svinfo(), just add a timestamp
 		_satellite_info->timestamp = gps_absolute_time();
 
+#if defined(GPS_UBX_RAW_TOPICS)
+
+		// Parent provides the ubx_nav_sat topic: publish the raw table instead of the CSV.
+		// Only NAV-SAT fills _nav_sat_raw; the legacy NAV-SVINFO path has no gnssId/svId.
+		if (_rx_msg == UBX_MSG_NAV_SAT) {
+			_nav_sat_raw.timestamp = _satellite_info->timestamp;
+			_ubx_nav_sat_pub.publish(_nav_sat_raw);
+		}
+
+#else
 		/* ---- Satellite CSV --------------------------------------------------------
 		 * One line per satellite, same shape as the NAV-PVT CSV above:
 		 *
@@ -3217,6 +3291,7 @@ GPSDriverUBX::payloadRxDone()
 					  (unsigned)_satellite_info->snr[i]);
 			}
 		}
+#endif // GPS_UBX_RAW_TOPICS
 
 		ret = 2;
 		break;
